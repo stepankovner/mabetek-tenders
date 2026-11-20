@@ -243,19 +243,24 @@ async function telegram(req:Request,e:Env){
       else reply='Разбор поставлен в очередь на Mac.';
       break;
     }
-    case '/check':
-      reply=await pollAll(e)?'Проверка обработана с учётом интервала опроса. Результат в /status.':'Дневной бюджет обходов исчерпан. Новый бюджет начнётся в 00:00 UTC.';break;
+    case '/check':{
+      const admitted=await pollAll(e);
+      if(admitted)await rankNotices(e);
+      reply=admitted?'Проверка обработана с учётом интервала опроса. Результат в /status.':'Дневной бюджет обходов исчерпан. Новый бюджет начнётся в 00:00 UTC.';
+      break;
+    }
     case '/status':{
       const sources=(await sql(e,'SELECT * FROM sources ORDER BY id').all()).results;
       const labels:Record<string,string>={eis:'ЕИС',b2b:'B2B-Center',...Object.fromEntries(Object.entries(publicCatalogues).map(([id,c])=>[id,c.name]))};
       const sourceStatus=sources.map(s=>(s.id.startsWith('mac/')?'Mac · '+(labels[s.id.slice(4)]||s.id.slice(4)):(labels[s.id]||s.id))+': '+(s.last_error||(s.last_ok?'проверено '+new Date(s.last_ok*1000).toISOString():'проверки ещё не было'))).join('\n');
       const a=await sql(e,'SELECT * FROM agent_state WHERE id=1').first();
       const count=await sql(e,"SELECT count(*) AS n,min(created) AS oldest FROM jobs WHERE state IN ('queued','running')").first();
+      const cards=await sql(e,'SELECT count(*) AS n FROM pending_cards').first();
       const usage=await sql(e,"SELECT total,background FROM scan_usage WHERE day=date('now')").first();
       const budget=scanBudget(e);
       const sample=await sql(e,'SELECT count(*) AS total,count(published) AS dated FROM delivery_observations WHERE sent>=unixepoch()-604800').first();
       const percentile=sample?.dated?await sql(e,'SELECT sent-published AS seconds FROM delivery_observations WHERE sent>=unixepoch()-604800 AND published IS NOT NULL ORDER BY sent-published LIMIT 1 OFFSET ?',Math.ceil(sample.dated*0.95)-1).first():null;
-      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nВозраст старейшей, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(percentile?Math.ceil(percentile.seconds/60)+' мин':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';break;
+      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nКарточек ожидают Mac: '+cards?.n+'\nВозраст старейшей задачи разбора или КП, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(percentile?Math.ceil(percentile.seconds/60)+' мин':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';break;
     }
     case '/semantic':{
       if(!e.AI){reply='Бесплатная модель поиска пока не подключена.';break;}
