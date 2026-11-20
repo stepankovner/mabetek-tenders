@@ -14,7 +14,7 @@ interface Statement {
 }
 interface Env {
   DB:{prepare(sql:string):Statement;batch(sql:Statement[]):Promise<unknown>};
-  RELEASE?:string; AI?:{run:Function}; WEBHOOK_SECRET:string; BOT_TOKEN:string; AGENT_KEY:string;
+  SCAN_DAILY_LIMIT?:string; SCAN_COMMAND_RESERVE?:string; RELEASE?:string; AI?:{run:Function}; WEBHOOK_SECRET:string; BOT_TOKEN:string; AGENT_KEY:string;
 }
 const help='/watch ссылка — разобрать извещение РЖД или лот Росэлторга\n/status — источники и Mac\n/check — запросить обход\n/inbox — последние извещения\n/settings — управление агентом\n/semantic — смысловая подборка';
 const now=()=>Math.floor(Date.now()/1000);
@@ -64,8 +64,19 @@ async function poll(e:Env) {
     await sql(e,"UPDATE sources SET last_error=?,next_at=unixepoch()+? WHERE id='eis'",detail,delay).run();
   }
 }
-async function pollAll(e:Env){
+function scanBudget(e:Env){
+  function setting(raw:string|undefined,fallback:number){
+    return raw!==undefined && /^\d{1,6}$/.test(raw)?Number(raw):fallback;
+  }
+  const limit=setting(e.SCAN_DAILY_LIMIT,112);
+  return {limit,reserve:Math.min(limit,setting(e.SCAN_COMMAND_RESERVE,16))};
+}
+async function pollAll(e:Env,background=false){
+  const {limit,reserve}=scanBudget(e);
+  const daily=await sql(e,"INSERT INTO scan_usage(day,total,background) SELECT date('now'),1,? WHERE ?>0 AND (?=0 OR ?>0) ON CONFLICT(day) DO UPDATE SET total=total+1,background=background+excluded.background WHERE total<? AND (?=0 OR background<?) RETURNING total",Number(background),limit,Number(background),limit-reserve,limit,Number(background),limit-reserve).first();
+  if(!daily)return false;
   await Promise.all([poll(e),b2b(e),publicPoll(e,'roseltorg'),publicPoll(e,'tektorg'),publicPoll(e,'gpb')]);
+  return true;
 }
 async function deliver(e:Env) {
   for(let n=0;n<5;n++){
@@ -75,7 +86,24 @@ async function deliver(e:Env) {
     const r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:m.owner,...JSON.parse(m.payload)}),signal:AbortSignal.timeout(10000)});
     if(r.ok){
       const ack=await r.json() as any;
-      if(ack.ok)await sql(e,"UPDATE outbox SET state='sent',message_id=? WHERE id=?",ack.result.message_id,m.id).run();
+      if(ack.ok){
+        const changes=[sql(e,"UPDATE outbox SET state='sent',message_id=? WHERE id=?",ack.result.message_id,m.id)];
+        const key=String(m.dedupe);
+        const source=key.startsWith('eis/')?'eis':key.startsWith('b2b/')?'b2b':key.startsWith('https://')?'catalogue':null;
+        if(source && Number.isSafeInteger(ack.result.date)){
+          let published=null;
+          if(source==='eis'){
+            const notice=await sql(e,'SELECT published FROM notices WHERE url=?',key.slice(4)).first();
+            const raw=notice?.published||'';
+            if(/(?:GMT|UTC|Z|[+-]\d{2}:?\d{2})$/i.test(raw.trim())){
+              const t=Math.floor(Date.parse(raw)/1000);
+              if(Number.isFinite(t)&&t<=ack.result.date)published=t;
+            }
+          }
+          changes.push(sql(e,'INSERT OR IGNORE INTO delivery_observations VALUES(?,?,?,?,?)',m.id,source,m.created,ack.result.date,published));
+        }
+        await e.DB.batch(changes);
+      }
     }
   }
 }
@@ -205,14 +233,18 @@ async function telegram(req:Request,e:Env){
       break;
     }
     case '/check':
-      await pollAll(e);reply='Проверка обработана с учётом интервала опроса. Результат в /status.';break;
+      reply=await pollAll(e)?'Проверка обработана с учётом интервала опроса. Результат в /status.':'Дневной бюджет обходов исчерпан. Новый бюджет начнётся в 00:00 UTC.';break;
     case '/status':{
       const sources=(await sql(e,'SELECT * FROM sources ORDER BY id').all()).results;
       const labels:Record<string,string>={eis:'ЕИС',b2b:'B2B-Center',...Object.fromEntries(Object.entries(publicCatalogues).map(([id,c])=>[id,c.name]))};
       const sourceStatus=sources.map(s=>(s.id.startsWith('mac/')?'Mac · '+(labels[s.id.slice(4)]||s.id.slice(4)):(labels[s.id]||s.id))+': '+(s.last_error||(s.last_ok?'проверено '+new Date(s.last_ok*1000).toISOString():'проверки ещё не было'))).join('\n');
       const a=await sql(e,'SELECT * FROM agent_state WHERE id=1').first();
       const count=await sql(e,"SELECT count(*) AS n,min(created) AS oldest FROM jobs WHERE state IN ('queued','running')").first();
-      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nВозраст старейшей, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nРасход аккаунта: нет телеметрии.';break;
+      const usage=await sql(e,"SELECT total,background FROM scan_usage WHERE day=date('now')").first();
+      const budget=scanBudget(e);
+      const sample=await sql(e,'SELECT count(*) AS total,count(published) AS dated FROM delivery_observations WHERE sent>=unixepoch()-604800').first();
+      const percentile=sample?.dated?await sql(e,'SELECT sent-published AS seconds FROM delivery_observations WHERE sent>=unixepoch()-604800 AND published IS NOT NULL ORDER BY sent-published LIMIT 1 OFFSET ?',Math.ceil(sample.dated*0.95)-1).first():null;
+      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nВозраст старейшей, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(percentile?Math.ceil(percentile.seconds/60)+' мин':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';break;
     }
     case '/semantic':{
       if(!e.AI){reply='Бесплатная модель поиска пока не подключена.';break;}
@@ -270,10 +302,10 @@ async function telegram(req:Request,e:Env){
 async function agent(req:Request,e:Env,path:string) {
   if(!await same(req.headers.get('Authorization'),'Bearer '+(e.AGENT_KEY||''))||!e.AGENT_KEY)return response({},403);
   if(path==='/agent/check'){
-    await pollAll(e);
+    const admitted=await pollAll(e);
     await deliver(e);
     const {results}=await sql(e,'SELECT id,last_ok,last_error,cursor,next_at FROM sources ORDER BY id').all();
-    return response({sources:results});
+    return response({sources:results,admitted});
   }
   if(path==='/agent/pdf'){
     const id=req.headers.get('x-job'),lease=req.headers.get('x-lease');
@@ -281,7 +313,12 @@ async function agent(req:Request,e:Env,path:string) {
     if(!job)return response({},409);
     const blob=await req.blob();
     if(blob.size>8000000 || await blob.slice(0,5).text()!=='%PDF-')return response({},400);
-    const approved=offer(JSON.parse((await sql(e,'SELECT payload FROM versions WHERE lot=? AND revision=?',job.lot,job.revision).first())!.payload),Object.fromEntries((await sql(e,'SELECT field,value FROM answers WHERE owner=? AND lot=? AND revision=?',job.owner,job.lot,job.revision).all()).results.map(r=>[r.field,r.value])));
+    const version=await sql(e,'SELECT payload FROM versions WHERE lot=? AND revision=?',job.lot,job.revision).first();
+    const answers=await sql(e,'SELECT field,value FROM answers WHERE owner=? AND lot=? AND revision=?',job.owner,job.lot,job.revision).all();
+    if(!version)return response({},409);
+    let approved;
+    try{approved=offer(JSON.parse(version.payload),Object.fromEntries(answers.results.map(r=>[r.field,r.value])));}
+    catch{return response({},409);}
     if(job.op!=='pdf/'+await hash(JSON.stringify(approved.data)))return response({},409);
     const locked=await sql(e,"UPDATE jobs SET state='uncertain' WHERE id=? AND state='running' AND lease=? RETURNING id",id,lease).first();
     if(!locked)return response({},409);
@@ -328,5 +365,5 @@ export default {
     if(path.startsWith('/agent/'))return agent(req,e,path);
     return response({},404);
   },
-  async scheduled(_event:unknown,e:Env){await pollAll(e);await deliver(e);await rankNotices(e);}
+  async scheduled(_event:unknown,e:Env){const admitted=await pollAll(e,true);await deliver(e);if(admitted)await rankNotices(e);}
 };

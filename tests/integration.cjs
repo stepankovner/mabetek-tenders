@@ -119,15 +119,18 @@ test('Scheduled EIS poll sends a matching notice once and skips unrelated suppli
  const {db,env}=fixture();
  db.exec("INSERT INTO owner(id) VALUES('1')");
  const previous=global.fetch, sent=[];
+ const published=new Date(Date.now()-600000).toUTCString();
  const items=['Услуги по выгрузке вагонов в Хабаровске','Поставка железнодорожных колёс в Хабаровск'];
  global.fetch=async(url,opts)=>{
-   if(String(url).startsWith('https://zakupki.gov.ru/')) return new Response('<rss><channel>'+items.map((title,i)=>'<item><link>https://zakupki.gov.ru/'+i+'</link><title>'+title+'</title></item>').join('')+'</channel></rss>');
-   if(String(url).endsWith('/sendMessage')){sent.push(JSON.parse(opts.body).text);return Response.json({ok:true,result:{message_id:55}});}
+   if(String(url).startsWith('https://zakupki.gov.ru/')) return new Response('<rss><channel>'+items.map((title,i)=>'<item><link>https://zakupki.gov.ru/'+i+'</link><title>'+title+'</title><pubDate>'+published+'</pubDate></item>').join('')+'</channel></rss>');
+   if(String(url).endsWith('/sendMessage')){sent.push(JSON.parse(opts.body).text);return Response.json({ok:true,result:{message_id:55,date:Math.floor(Date.now()/1000)}});}
    return new Response('',{status:503});
  };
  try{
    for(let i=0;i<2;i++){db.exec("UPDATE sources SET next_at=0");await worker.scheduled({},env);}
    assert.equal(sent.length,1);
+   const delivery=db.prepare('SELECT sent-published AS seconds FROM delivery_observations').get();
+   assert.ok(delivery.seconds>=600 && delivery.seconds<=605);
    assert.match(sent[0],/выгрузке вагонов/);
    assert.equal(db.prepare('SELECT count(*) n FROM notices').get().n,2);
  }finally{global.fetch=previous;db.close();}
@@ -224,5 +227,17 @@ test('Changed B2B titles refresh the stored original without a duplicate Telegra
   const row=db.prepare('SELECT title,updated FROM notices').get();
   assert.equal(row.title,title);assert.ok(row.updated>before);
   assert.equal(db.prepare('SELECT count(*) AS n FROM outbox').get().n,1);
+ }finally{global.fetch=old;db.close();}
+});
+test('Daily background quota leaves room for a manual scan',async()=>{
+ const {db,env}=fixture(), old=global.fetch;
+ Object.assign(env,{SCAN_DAILY_LIMIT:'2',SCAN_COMMAND_RESERVE:'1'});
+ global.fetch=async()=>new Response('',{status:503});
+ const check=()=>worker.fetch(new Request('https://example.test/agent/check',{method:'POST',headers:{Authorization:'Bearer '+env.AGENT_KEY},body:'{}'}),env).then(r=>r.json());
+ try{
+  await worker.scheduled({},env);await worker.scheduled({},env);
+  assert.equal(db.prepare('SELECT total FROM scan_usage').get().total,1);
+  assert.equal((await check()).admitted,true);
+  assert.equal((await check()).admitted,false);
  }finally{global.fetch=old;db.close();}
 });
