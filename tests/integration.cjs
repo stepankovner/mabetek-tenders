@@ -209,3 +209,20 @@ test('Mac catalogue independently reports errors and shares cloud notice dedupli
   assert.ok(status.last_ok);assert.match(status.last_error,/Не распознана/);
  }finally{db.close();}
 });
+test('Changed B2B titles refresh the stored original without a duplicate Telegram notification',async()=>{
+ const {db,env}=fixture(), old=global.fetch;
+ const monitor=require(path.join(tmp,'monitor.js'));
+ let title='Погрузка вагонов';
+ global.fetch=async()=>new Response('<a href="/market/gruz/tender-9999/">Тендер</a><p class="panel-procedure__dscr-main">'+title+'</p>');
+ try{
+  db.exec("INSERT INTO owner(id) VALUES('1')");
+  await monitor.b2b(env);
+  const before=db.prepare('SELECT updated FROM notices').get().updated;
+  title='Погрузка вагонов на площадке исполнителя';
+  db.exec('UPDATE sources SET next_at=0');
+  await monitor.b2b(env);
+  const row=db.prepare('SELECT title,updated FROM notices').get();
+  assert.equal(row.title,title);assert.ok(row.updated>before);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM outbox').get().n,1);
+ }finally{global.fetch=old;db.close();}
+});

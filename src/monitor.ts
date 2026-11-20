@@ -42,10 +42,10 @@ export async function b2b(e:any){
     const batch=[];
     for(const c of rows){
       // The actual title is obtained from the original, never reconstructed from a slug.
-      const old=await q('SELECT url FROM notices WHERE url=?',c.url).first();
-      if(old)continue;
+      const old=await q('SELECT title FROM notices WHERE url=?',c.url).first();
+      if(old && (!c.title || old.title===c.title))continue;
       const title=c.title||b2bTitle(await page(c.url),c.id);
-      batch.push(q("INSERT OR IGNORE INTO notices(url,title,description) VALUES(?,?,'B2B-Center · место и документы требуют проверки')",c.url,title));
+      batch.push(q("INSERT INTO notices(url,title,description) VALUES(?,?,'B2B-Center · место и документы требуют проверки') ON CONFLICT(url) DO UPDATE SET title=excluded.title,updated=max(unixepoch(),updated+1) WHERE title!=excluded.title",c.url,title));
       if(!construction.test(title))batch.push(q("INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner",'b2b/'+c.id,JSON.stringify({text:'Подборка B2B-Center · проверить место исполнения\n'+title+'\n'+c.url})));
 
     }
