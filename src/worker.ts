@@ -89,8 +89,8 @@ async function deliver(e:Env) {
     if(payload.word){
       const {lot,vat}=payload.word;
       const draft=draftWord(lot,vat),form=new FormData();
-      form.set('chat_id',m.owner);form.set('document',draft.file,'RZD-32616584495-lot-'+lot+'.docx');
-      form.set('caption','Черновик технического предложения РЖД. '+(draft.filled?'Ставка НДС перенесена из ваших условий.':'Поле ставки НДС оставлено пустым. Подтвердите его заполнение вручную.')+' Проверьте пункт 1 о полном соответствии ТЗ и место оказания услуг до подачи. Сведения об участнике, персонале и согласия оформляются отдельно.');
+      form.set('chat_id',m.owner);form.set('document',draft.file,'RZD-32616584495-'+(lot?'lot-'+lot:'blank')+'.docx');
+      form.set('caption','Черновик технического предложения РЖД. '+(draft.filled?'Ставка НДС перенесена из ваших условий.':'Поле ставки НДС оставлено пустым. Подтвердите его заполнение вручную.')+(lot?'':' Впишите номер лота из извещения.')+' Проверьте пункт 1 о полном соответствии ТЗ и место оказания услуг до подачи. Сведения об участнике, персонале и согласия оформляются отдельно.');
       r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendDocument',{method:'POST',body:form,signal:AbortSignal.timeout(10000)});
     }else{
       r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:m.owner,...payload}),signal:AbortSignal.timeout(10000)});
@@ -186,7 +186,8 @@ async function telegram(req:Request,e:Env){
       try{
         const current=await readCard(stored.url);
         const docs='documents' in current?current.documents||[]:[];
-        const links=docs.slice(0,30).map((d:any)=>[{text:d.name.slice(0,60),url:d.url}]);
+        const links:any[][]=docs.slice(0,30).map((d:any)=>[{text:d.name.slice(0,60),url:d.url}]);
+        if(supportsForm(current))links.push([{text:'Пустой бланк технического предложения Word',callback_data:'/blank '+id+' '+revision}]);
         links.push([{text:'Все документы в оригинале',url:stored.url}]);
         reply=docs.length?'Приложения к извещению: '+docs.length:'На странице не найдены ссылки на приложения.';
         markup={inline_keyboard:links};
@@ -207,6 +208,18 @@ async function telegram(req:Request,e:Env){
       const field=action==='/reject'?'reject':missing[0];
       mutations.push(sql(e,'INSERT OR REPLACE INTO sessions VALUES(?,?,?,?)',user,id,v,field));
       reply=field==='reject'?'Почему лот не подходит?':missing[1];break;
+    }
+    case '/blank':{
+      const [,id,v]=text.split(' ');
+      const row=await sql(e,'SELECT x.payload FROM versions x JOIN lots l ON l.id=x.lot AND l.revision=x.revision WHERE x.lot=? AND x.revision=?',id||'',v||'').first();
+      const card=row && JSON.parse(row.payload);
+      if(!card || !supportsForm(card)){reply='Откройте документы актуальной карточки.';break;}
+      try{
+        if(!supportsForm(await readCard(card.url)) || !await verifyOriginal())throw Error();
+        mutations.push(sql(e,'INSERT OR IGNORE INTO outbox(dedupe,owner,payload) VALUES(?,?,?)','blank/'+user+'/'+id+'/'+v,user,JSON.stringify({word:{lot:'',vat:''}})));
+        reply='Пустой бланк для этой версии закупки выдаётся один раз. Заполненная форма доступна после сводки условий.';
+      }catch{reply='Оригинал формы не удалось подтвердить. Повторите запрос позже.';}
+      break;
     }
     case '/word':case '/transfer':{
       const [,lot,v]=text.split(' ');
