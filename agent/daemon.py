@@ -14,7 +14,7 @@ from pathlib import Path
 from .pipeline import classify, render
 import tempfile
 
-CONFIG=Path.home()/"Library/Application Support/mabetek-tenders/agent.json"
+CONFIG=Path(os.environ.get("MABETEK_AGENT_CONFIG",Path.home()/"Library/Application Support/mabetek-tenders/agent.json"))
 LABEL="ru.mabetek.tenders.agent"
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -26,6 +26,10 @@ def settings():
     from urllib.parse import urlsplit
     url=urlsplit(conf["worker"])
     if url.scheme!="https" or not url.hostname or url.username or url.password or url.path not in ("","/"): raise ValueError("Требуется HTTPS адрес Worker")
+    if "key" not in conf:
+        keychain=subprocess.run(["/usr/bin/security","find-generic-password","-s","mabetek-tenders.agent","-a","mabetek-tenders.agent","-w"],capture_output=True,text=True,timeout=30)
+        if keychain.returncode: raise ValueError("Нет доступа к ключу агента в связке Вход")
+        conf["key"]=keychain.stdout.strip()
     if len(conf["key"])<32: raise ValueError("Короткий ключ агента")
     return conf
 
@@ -42,7 +46,9 @@ def tick(conf):
     if job["op"].startswith("pdf/"):
         with tempfile.TemporaryDirectory() as td:
             out=Path(td)/"offer.pdf"
-            render(json.loads(job["input"]),out,template=conf["template"])
+            terms=json.loads(job["input"])
+            demo=any("демонстрацион" in str(terms.get(k,"")).lower() for k in ("terms","dates","validity","vat"))
+            render(terms,out,template=conf["template"],demo=demo)
             req=urllib.request.Request(conf["worker"].rstrip("/")+"/agent/pdf",out.read_bytes(),{"Authorization":"Bearer "+conf["key"],"x-job":str(job["id"]),"x-lease":job["lease"],"Content-Type":"application/pdf"})
             with urllib.request.build_opener(NoRedirect()).open(req,timeout=50) as res:res.read()
         return
