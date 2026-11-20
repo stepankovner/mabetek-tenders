@@ -6,19 +6,19 @@ export function supportsForm(card:any){
   return card.source==='rzd-rts' && card.procedure==='24233643' && card.registration==='32616584495' && card.documents?.some((d:any)=>d.url.toLowerCase()===original.toLowerCase());
 }
 export async function verifyOriginal(){
-  const r=await fetch(original,{redirect:'error',signal:AbortSignal.timeout(10000)});
-  if(!r.ok || !r.body)return false;
+  const r=await fetch(original,{redirect:'error',signal:AbortSignal.timeout(10000)}).catch(()=>null);
+  if(!r?.ok || !r.body)return 'unavailable';
   const bytes=new Uint8Array(391168),reader=r.body.getReader();
   let offset=0;
   for(;;){
     const {done,value}=await reader.read();
     if(done)break;
-    if(value.length>bytes.length-offset){await reader.cancel();return false;}
+    if(value.length>bytes.length-offset){await reader.cancel();return 'changed';}
     bytes.set(value,offset);offset+=value.length;
   }
-  if(offset!==bytes.length)return false;
+  if(offset!==bytes.length)return r.headers.get('content-type')?.includes('text/html')?'unavailable':'changed';
   const sum=await crypto.subtle.digest('SHA-256',bytes);
-  return Array.from(new Uint8Array(sum),n=>n.toString(16).padStart(2,'0')).join('')===digest;
+  return Array.from(new Uint8Array(sum),n=>n.toString(16).padStart(2,'0')).join('')===digest?'current':'changed';
 }
 
 // Stored ZIP entries, with their sizes and CRC in both directory records.

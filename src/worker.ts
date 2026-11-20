@@ -90,7 +90,7 @@ async function deliver(e:Env) {
       const {lot,vat}=payload.word;
       const draft=draftWord(lot,vat),form=new FormData();
       form.set('chat_id',m.owner);form.set('document',draft.file,'RZD-32616584495-'+(lot?'lot-'+lot:'blank')+'.docx');
-      form.set('caption','Черновик технического предложения РЖД. '+(draft.filled?'Ставка НДС перенесена из ваших условий.':'Поле ставки НДС оставлено пустым. Подтвердите его заполнение вручную.')+(lot?'':' Впишите номер лота из извещения.')+' Проверьте пункт 1 о полном соответствии ТЗ и место оказания услуг до подачи. Сведения об участнике, персонале и согласия оформляются отдельно.');
+      form.set('caption',(payload.word.cached?'Бланк из ранее проверенной копии приложения. Сверьте его с оригиналом перед подачей. ':'')+'Черновик технического предложения РЖД. '+(draft.filled?'Ставка НДС перенесена из ваших условий.':'Поле ставки НДС оставлено пустым. Подтвердите его заполнение вручную.')+(lot?'':' Впишите номер лота из извещения.')+' Проверьте пункт 1 о полном соответствии ТЗ и место оказания услуг до подачи. Сведения об участнике, персонале и согласия оформляются отдельно.');
       r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendDocument',{method:'POST',body:form,signal:AbortSignal.timeout(10000)});
     }else{
       r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:m.owner,...payload}),signal:AbortSignal.timeout(10000)});
@@ -215,8 +215,10 @@ async function telegram(req:Request,e:Env){
       const card=row && JSON.parse(row.payload);
       if(!card || !supportsForm(card)){reply='Откройте документы актуальной карточки.';break;}
       try{
-        if(!supportsForm(await readCard(card.url)) || !await verifyOriginal())throw Error();
-        mutations.push(sql(e,'INSERT OR IGNORE INTO outbox(dedupe,owner,payload) VALUES(?,?,?)','blank/'+user+'/'+id+'/'+v,user,JSON.stringify({word:{lot:'',vat:''}})));
+        if(!supportsForm(await readCard(card.url)))throw Error();
+        const source=await verifyOriginal();
+        if(source==='changed')throw Error();
+        mutations.push(sql(e,'INSERT OR IGNORE INTO outbox(dedupe,owner,payload) VALUES(?,?,?)','blank/'+user+'/'+id+'/'+v,user,JSON.stringify({word:{lot:'',vat:'',cached:source==='unavailable'}})));
         reply='Пустой бланк для этой версии закупки выдаётся один раз. Заполненная форма доступна после сводки условий.';
       }catch{reply='Оригинал формы не удалось подтвердить. Повторите запрос позже.';}
       break;
@@ -233,12 +235,13 @@ async function telegram(req:Request,e:Env){
         if(text.startsWith('/word ')){
           if(text.split(' ')[3]!==signature || !supportsForm(card)){reply='Откройте актуальную сводку условий.';break;}
           const current=await readCard(card.url);
-          if(JSON.stringify(current)!==JSON.stringify(card)||!await verifyOriginal()){reply='Не удалось подтвердить исходную форму. Откройте оригинал и проверьте приложения.';break;}
+          const source=await verifyOriginal();
+          if(JSON.stringify(current)!==JSON.stringify(card)||source==='changed'){reply='Не удалось подтвердить исходную форму. Откройте оригинал и проверьте приложения.';break;}
           const draft=draftWord(answers.verified,answers.vat);
           const dedupe='word/'+user+'/'+lot+'/'+v+'/'+signature;
           const previous=await sql(e,'SELECT state FROM outbox WHERE dedupe=?',dedupe).first();
           if(previous){reply=previous.state==='sent'?'Эта версия формы уже отправлена в чат.':'Эта версия формы уже поставлена на отправку. Проверьте историю чата.';break;}
-          mutations.push(sql(e,'INSERT OR IGNORE INTO outbox(dedupe,owner,payload) VALUES(?,?,?)',dedupe,user,JSON.stringify({word:{lot:answers.verified,vat:answers.vat}})));
+          mutations.push(sql(e,'INSERT OR IGNORE INTO outbox(dedupe,owner,payload) VALUES(?,?,?)',dedupe,user,JSON.stringify({word:{lot:answers.verified,vat:answers.vat,cached:source==='unavailable'}})));
           reply=draft.filled?'Подготовлен черновик Word со ставкой из ваших условий.':'Подготовлен черновик Word. Требуется ручное заполнение поля НДС.';
           break;
         }
