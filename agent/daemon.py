@@ -54,6 +54,13 @@ def tick(conf):
         return
     verdict,reason=classify(card.get("title","")+" "+card.get("description",""),card.get("place",""))
     result="Предмет: "+card.get("title","не указано")+"\nОценка: "+verdict+" — "+reason+"\nПодтверждено: два пути 125 и 111 м, ПРР по заявке.\nСемье: доступна ли площадка в требуемые даты и какова ставка?\nЗаказчику: допускается ли площадка исполнителя на Батуевской Ветке, 19?\nОригинал: "+card["url"]
+    if card.get("source")=="rzd-rts":
+        from .rzd_documents import review
+        try:
+            evidence=review(card,CONFIG.parent/"documents")
+        except (OSError,ValueError):
+            evidence="Оригинал с приложениями недоступен."
+        result+="\nПроверка приложений:\n"+evidence
     request(conf,"result",dict(id=job["id"],lease=job["lease"],text=result[:3500]))
 
 def install():
