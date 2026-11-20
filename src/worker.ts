@@ -341,7 +341,7 @@ async function agent(req:Request,e:Env,path:string) {
   const body=await req.json() as any;
   if(path==='/agent/card-claim'){
     const task=await sql(e,"UPDATE pending_cards SET lease=?,available=unixepoch()+120 WHERE url=(SELECT url FROM pending_cards WHERE available<=unixepoch() AND (SELECT paused FROM agent_state WHERE id=1)=0 ORDER BY request_id LIMIT 1) RETURNING url,lease",crypto.randomUUID()).first();
-    return response(task);
+    return response(task??null);
   }
   if(path==='/agent/card-result'){
     const task=await sql(e,'SELECT * FROM pending_cards WHERE url=? AND lease=? AND available>=unixepoch()',body.url,body.lease).first();
