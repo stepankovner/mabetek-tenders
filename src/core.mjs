@@ -46,11 +46,21 @@ export function rzdTime(raw) {
 
 export function b2bIndex(html) {
   const unique=new Map();
-  for(const a of html.matchAll(/<a\b[^>]*\bhref=["']([^"']+\/tender-(\d+)\/(?:\?[^"']*)?)["']/gi)){
+  for(const a of html.matchAll(/<a\b[^>]*\bhref=["']([^"']+\/tender-(\d+)\/(?:[?#][^"']*)?)["']/gi)){
     const url=new URL(a[1].replace(/&amp;/g,'&'),'https://www.b2b-center.ru');
     if(url.origin!=='https://www.b2b-center.ru' || !/^\/(?:app\/market-next|market)\//.test(url.pathname))continue;
     unique.set(a[2],{id:a[2],url:url.origin+url.pathname});
   }
   if(!unique.size && !/(?:ничего не найдено|по вашему запросу.*не найдено)/i.test(html))throw Error('Не распознана выдача B2B-Center');
   return [...unique.values()];
+}
+
+export function b2bTitle(html,id) {
+  const element = html.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  if (!element || !/^\d+$/.test(id)) throw Error('Нет заголовка оригинала');
+  const parts = element[1].split(/\s+[—–]\s+(?:Тендер|Закупка|Лот)\s*№\s*/i);
+  if (parts.length !== 2 || parts[1].match(/^\d+/)?.[0] !== id) throw Error('Нет заголовка оригинала');
+  const title = parts[0].replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
+  if (!title) throw Error('Нет заголовка оригинала');
+  return title;
 }

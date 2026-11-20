@@ -79,3 +79,29 @@ test('Registration accepts same-site form with opaque Origin but requires the ag
     assert.equal(await (await worker.fetch(make('https://other.invalid','cross-site'),env)).text(),'Недоступно');
   }finally{db.close();}
 });
+test('B2B stores one notice from a tracked catalogue URL and honors Retry-After',async()=>{
+  const {db,env}=fixture();
+  db.exec("INSERT INTO owner(id) VALUES('1')");
+  const monitor=require(path.join(tmp,'monitor.js'));
+  const previous=global.fetch;
+  const slug='/market/pogruzka-vagonov/tender-1234567/';
+  let limited=true;
+  global.fetch=async url=>{
+    if(limited)return new Response(null,{status:429,headers:{'Retry-After':'2400'}});
+    if(String(url).includes('market-search'))return new Response('<a href="'+slug+'#btid=2"></a><a href="'+slug+'">№ 1234567</a>');
+    assert.equal(url,'https://www.b2b-center.ru'+slug);
+    return new Response('<title>Погрузка вагонов — Тендер № 1234567 — B2B-Center</title>');
+  };
+  try{
+    await monitor.b2b(env);
+    assert.ok(db.prepare("SELECT next_at-unixepoch() AS delay FROM sources WHERE id='b2b'").get().delay>=2399);
+    limited=false;
+    for(let i=0;i<2;i++){
+      db.exec("UPDATE sources SET next_at=0 WHERE id='b2b'");
+      await monitor.b2b(env);
+    }
+    assert.equal(db.prepare('SELECT title FROM notices').get().title,'Погрузка вагонов');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n,1);
+    assert.equal(db.prepare("SELECT last_error FROM sources WHERE id='b2b'").get().last_error,null);
+  }finally{global.fetch=previous;db.close();}
+});

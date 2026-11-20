@@ -38,3 +38,16 @@ test('B2B-Center: извещения, повторы ссылок, контро�
  assert.throws(()=>core.b2bIndex('<title>Captcha</title>'));
  assert.throws(()=>core.b2bIndex('<a href="https://foreign.invalid'+u+'">Торги</a>'));
 });
+
+test('B2B strips the tracking fragment used in the public catalogue',()=>{
+  const path='/market/sklad/tender-4691136/';
+  const html='<a href="'+path+'#btid=2&amp;tsid=4691136004"></a>';
+  assert.deepEqual(core.b2bIndex(html),[{id:'4691136',url:'https://www.b2b-center.ru'+path}]);
+});
+
+test('B2B uses the subject and verifies the original procedure number',()=>{
+  const page='<title>Услуги хранения — Тендер № 123 — B2B-Center</title><h1>Запрос предложений № 123</h1>';
+  assert.equal(core.b2bTitle(page,'123'),'Услуги хранения');
+  assert.throws(()=>core.b2bTitle(page,'12'));
+  assert.throws(()=>core.b2bTitle('<title>Вход</title>','123'));
+});
