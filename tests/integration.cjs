@@ -146,3 +146,19 @@ test('Semantic queue survives quota errors, caches profile and updates edited no
    assert.equal(db.prepare('SELECT source_updated FROM semantic_results').get().source_updated,2);
  }finally{db.close();}
 });
+test('Publish smoke reports its revision and permits live polling only to the Mac owner',async()=>{
+ const {db,env}=fixture();
+ env.RELEASE='test-revision';
+ const previous=global.fetch;
+ global.fetch=async()=>new Response('',{status:503});
+ try{
+   const health=await worker.fetch(new Request('https://example.test/health'),env);
+   assert.equal((await health.json()).release,'test-revision');
+   const check=key=>worker.fetch(new Request('https://example.test/agent/check',{method:'POST',headers:{Authorization:'Bearer '+key},body:'{}'}),env);
+   assert.equal((await check('wrong')).status,403);
+   const res=await check(env.AGENT_KEY);
+   const status=await res.json();
+   assert.equal(status.sources.length,5);
+   assert.ok(status.sources.every(s=>s.last_error&&!s.last_ok));
+ } finally{db.close();global.fetch=previous;}
+});

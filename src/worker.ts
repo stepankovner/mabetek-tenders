@@ -14,7 +14,7 @@ interface Statement {
 }
 interface Env {
   DB:{prepare(sql:string):Statement;batch(sql:Statement[]):Promise<unknown>};
-  AI?:{run:Function}; WEBHOOK_SECRET:string; BOT_TOKEN:string; AGENT_KEY:string;
+  RELEASE?:string; AI?:{run:Function}; WEBHOOK_SECRET:string; BOT_TOKEN:string; AGENT_KEY:string;
 }
 const help='/watch ссылка — разобрать извещение секции РЖД\n/status — источники и Mac\n/check — запросить обход\n/inbox — последние извещения\n/settings — управление агентом\n/semantic — смысловая подборка';
 const now=()=>Math.floor(Date.now()/1000);
@@ -63,6 +63,9 @@ async function poll(e:Env) {
     const detail=err instanceof Error && /^(HTTP \d+|Ожидалась|Превышен|Изменился|Повреждена)/.test(err.message)?err.message:'Нет доступа к публичной выдаче';
     await sql(e,"UPDATE sources SET last_error=?,next_at=unixepoch()+? WHERE id='eis'",detail,delay).run();
   }
+}
+async function pollAll(e:Env){
+  await Promise.all([poll(e),b2b(e),publicPoll(e,'roseltorg'),publicPoll(e,'tektorg'),publicPoll(e,'gpb')]);
 }
 async function deliver(e:Env) {
   for(let n=0;n<5;n++){
@@ -177,7 +180,7 @@ async function telegram(req:Request,e:Env){
       reply='Задача разбора зарегистрирована. Состояние Mac доступно в /status.';break;
     }
     case '/check':
-      await Promise.all([poll(e),b2b(e),publicPoll(e,'roseltorg'),publicPoll(e,'tektorg'),publicPoll(e,'gpb')]);reply='Проверка обработана с учётом интервала опроса. Результат в /status.';break;
+      await pollAll(e);reply='Проверка обработана с учётом интервала опроса. Результат в /status.';break;
     case '/status':{
       const sources=(await sql(e,'SELECT * FROM sources ORDER BY id').all()).results;
       const labels:Record<string,string>={eis:'ЕИС',b2b:'B2B-Center',...Object.fromEntries(Object.entries(publicCatalogues).map(([id,c])=>[id,c.name]))};
@@ -238,6 +241,12 @@ async function telegram(req:Request,e:Env){
 }
 async function agent(req:Request,e:Env,path:string) {
   if(!await same(req.headers.get('Authorization'),'Bearer '+(e.AGENT_KEY||''))||!e.AGENT_KEY)return response({},403);
+  if(path==='/agent/check'){
+    await pollAll(e);
+    await deliver(e);
+    const {results}=await sql(e,'SELECT id,last_ok,last_error,cursor,next_at FROM sources ORDER BY id').all();
+    return response({sources:results});
+  }
   if(path==='/agent/pdf'){
     const id=req.headers.get('x-job'),lease=req.headers.get('x-lease');
     const job=await sql(e,"SELECT j.*,o.id AS owner FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision CROSS JOIN owner o WHERE j.id=? AND j.lease=? AND j.until_ts>=unixepoch() AND j.state='running' AND j.op LIKE 'pdf/%' AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.lot=j.lot AND d.revision=j.revision)",id,lease).first();
@@ -277,11 +286,12 @@ async function agent(req:Request,e:Env,path:string) {
 export default {
   async fetch(req:Request,e:Env){
     const path=new URL(req.url).pathname;
+    if(req.method==='GET' && path==='/health')return response({release:e.RELEASE||'unknown'});
     if(path==='/setup')return setup(req,e,same,hash);
     if(req.method!=='POST')return response({},404);
     if(path==='/telegram')return telegram(req,e);
     if(path.startsWith('/agent/'))return agent(req,e,path);
     return response({},404);
   },
-  async scheduled(_event:unknown,e:Env){await Promise.all([poll(e),b2b(e),publicPoll(e,'roseltorg'),publicPoll(e,'tektorg'),publicPoll(e,'gpb')]);await deliver(e);await rankNotices(e);}
+  async scheduled(_event:unknown,e:Env){await pollAll(e);await deliver(e);await rankNotices(e);}
 };
