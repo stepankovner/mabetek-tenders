@@ -1,7 +1,6 @@
-import {b2bIndex,b2bTitle,publicCatalogues,publicIndex,serviceMatch} from './core.mjs';
+import {b2bIndex,b2bTitle,publicCatalogues,publicIndex,catalogueMatch,construction} from './core.mjs';
 const catalog='https://www.b2b-center.ru/app/next/market-search/';
 const queries=['погрузочно-разгрузочные','перевалка','железнодорожный тупик','ответственное хранение','постановка вагонов','путь необщего пользования'];
-const construction=/^(?:устройство|ремонт|строительство|реконструкция|поставка запасных частей)(?:\s|$)/iu;
 class RateLimit extends Error {
   retryAt:number;
   constructor(header:string|null){
@@ -54,20 +53,50 @@ export async function publicPoll(e:any,source:keyof typeof publicCatalogues){
   const catalogue=publicCatalogues[source];
   const q=(s:string,...params:unknown[])=>e.DB.prepare(s).bind(...params);
   await q('INSERT OR IGNORE INTO sources(id,url) VALUES(?,?)',source,catalogue.url).run();
-  const due=await q('UPDATE sources SET next_at=unixepoch()+900 WHERE id=? AND next_at<=unixepoch() RETURNING id',source).first();
+  const due=await q('UPDATE sources SET next_at=unixepoch()+900 WHERE id=? AND next_at<=unixepoch() RETURNING cursor',source).first();
   if(!due)return;
   try{
-    const rows=publicIndex(source,await page(catalogue.url));
+    const result=source==='roseltorg'?await readRoseltorg(due.cursor):null;
+    const rows=result?result.rows:publicIndex(source,await page(catalogue.url));
     const statements=[];
-    for(const row of rows.filter(r=>serviceMatch(r.title)&&!construction.test(r.title))){
-      statements.push(q('INSERT OR IGNORE INTO notices(url,title,description) VALUES(?,?,?)',row.url,row.title,catalogue.name));
+    for(const row of rows){
+      statements.push(q('INSERT INTO notices(url,title,description) VALUES(?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,updated=max(unixepoch(),updated+1) WHERE title!=excluded.title',row.url,row.title,catalogue.name));
+      if(!catalogueMatch(row.title))continue;
       const message=catalogue.name+' · проверить место исполнения\n'+row.title.slice(0,600)+'\n'+row.url;
-      statements.push(q('INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner',row.url,JSON.stringify({text:message})));
+      const lot=source==='roseltorg'?new URL(row.url).pathname.match(/^\/procedure\/([\w-]+\/\d+)$/)?.[1]:null;
+      const payload=lot&&lot.length<=55?{text:message,reply_markup:{inline_keyboard:[[{text:'Открыть карточку',callback_data:'/ros '+lot}]]}}:{text:message};
+      statements.push(q('INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner',row.url,JSON.stringify(payload)));
     }
-    statements.push(q('UPDATE sources SET last_ok=unixepoch(),last_error=NULL,cursor=? WHERE id=?','Первая страница: '+rows.length,source));
+    statements.push(q('UPDATE sources SET last_ok=unixepoch(),last_error=NULL,cursor=? WHERE id=?',result?result.cursor:'Первая страница: '+rows.length,source));
     await e.DB.batch(statements);
   }catch(err){
     const reason=err instanceof Error && /^(HTTP \d+|Не распознана|Лимит размера)/.test(err.message)?err.message:'Источник недоступен с Worker';
     await q('UPDATE sources SET last_error=?,next_at=max(next_at,?) WHERE id=?',reason,err instanceof RateLimit?err.retryAt:0,source).run();
   }
+}
+
+async function readRoseltorg(stored:string|null){
+  let position={index:0,pages:queries.map(()=>0)};
+  if(stored?.startsWith('{')){
+    const parsed=JSON.parse(stored);
+    if(Number.isInteger(parsed.index)&&parsed.index>=0&&parsed.index<queries.length&&
+       Array.isArray(parsed.pages)&&parsed.pages.length===queries.length&&parsed.pages.every((n:number)=>Number.isSafeInteger(n)&&n>=0))position=parsed;
+  }
+  const index=position.index;
+  const current=position.pages[index];
+  const collected=new Map<string,{title:string,url:string}>();
+  for(const n of current?[0,current]:[0]){
+    const u=new URL('https://www.roseltorg.ru/procedures/search_ajax');
+    u.search=new URLSearchParams({query_field:queries[index],sale:'1','status[]':'0',page:String(n)}).toString();
+    const html=await page(u.href);
+    const empty=/Нет результатов,\s*соответствующих всем условиям/i.test(html);
+    const rows=empty?[]:publicIndex('roseltorg',html);
+    for(const row of rows)collected.set(row.url,row);
+    if(n===current){
+      const next=[...html.matchAll(/<button\b[^>]*>/gi)].some(([tag])=>tag.includes('pagination__btn--next') && !/\bdisabled\b/.test(tag) && new RegExp('(?:[?&]|&amp;)page='+(n+1)+'(?:[&"\x27]|$)').test(tag));
+      position.pages[index]=next?n+1:0;
+    }
+  }
+  position.index=(index+1)%queries.length;
+  return {rows:[...collected.values()],cursor:JSON.stringify(position)};
 }

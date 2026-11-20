@@ -51,3 +51,42 @@ def prepare(root):
 
 if __name__=='__main__':
     prepare(Path(__file__).resolve().parents[1]/'reports/archive')
+
+def combined_snapshot(root):
+    def load(filename):
+        return [json.loads(line) for line in (root/filename).read_text().splitlines()]
+    entries = load('development.jsonl') + load('held-out.jsonl') + load('roseltorg-verified.jsonl')
+    parents = {}
+
+    def representative(key):
+        parents.setdefault(key, key)
+        while key != parents[key]:
+            key = parents[key]
+        return key
+
+    for row in entries:
+        proc = representative('procedure/' + row['procedure'])
+        customer = row.get('organizer') or row.get('customer')
+        if customer:
+            key = normalize(customer) + '|' + normalize(row.get('procedure_title') or row['subject'])
+            parents[representative(key)] = proc
+    late = {representative('procedure/' + r['procedure']) for r in entries if r['published'] >= CUTOFF}
+    if len({r['id'] for r in entries}) != len(entries):
+        raise ValueError('Дубли ID в объединённом реестре')
+    for name, held in [('development', False), ('held-out', True)]:
+        rows = [r for r in entries if (representative('procedure/' + r['procedure']) in late) == held]
+        rows.sort(key=lambda r: hashlib.sha256(r['id'].encode()).hexdigest())
+        public = [dict(id=r['id'], published=r['published'], subject=r['subject'],
+                       customer=r.get('customer') or r.get('organizer'), place=r.get('place'),
+                       price=r.get('price'), currency=r.get('currency'), deadline=r.get('deadline'),
+                       url=r['url']) for r in rows]
+        data = ''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in public).encode()
+        path = root / ('v2-' + name + '.jsonl')
+        if path.exists() and path.read_bytes() != data:
+            raise ValueError('Замороженный набор изменился: ' + path.name)
+        if not path.exists():
+            path.write_bytes(data)
+        print(path.name, len(rows), hashlib.sha256(data).hexdigest())
+
+if __name__ == '__main__':
+    combined_snapshot(Path(__file__).resolve().parents[1]/'reports/archive')

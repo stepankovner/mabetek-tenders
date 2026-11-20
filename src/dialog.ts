@@ -22,6 +22,8 @@ export function validate(field:string,input:string){
 export function offer(card:any,answers:Record<string,string>){
   for(const [k] of questions)if(!answers[k])throw Error('Заполните обязательные поля');
   const {service,qty,unit,rate,vat,dates,terms,validity,verified}=answers;
+  if(!card.customer?.trim())throw Error('В оригинале не указан заказчик. Для КП требуется карточка с подтверждённым заказчиком.');
+  if(/^\d+$/.test(card.lot) && verified!==card.lot)throw Error('В оригинале указан лот '+card.lot+'. Проверьте и введите его номер.');
   const decimal=(s:string,n:number)=>{const [a,b='']=s.split('.');return BigInt(a+b.padEnd(n,'0'));};
   const cents=(decimal(qty,3)*decimal(rate,2)+500n)/1000n;
   const total=String(cents/100n)+'.'+String(cents%100n).padStart(2,'0');

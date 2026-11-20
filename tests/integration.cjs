@@ -164,3 +164,31 @@ test('Publish smoke reports its revision and permits live polling only to the Ma
    assert.ok(status.sources.every(s=>s.last_error&&!s.last_ok));
  } finally{db.close();global.fetch=previous;}
 });
+test('Roseltorg advances its cursor after writing matches and preserves it on a source failure',async()=>{
+ const {db,env}=fixture(); const monitor=require(path.join(tmp,'monitor.js'));
+ const old=global.fetch;let fail=false;
+ try{
+  global.fetch=async url=>{
+   const u=new URL(url);assert.equal(u.pathname,'/procedures/search_ajax');assert.equal(u.searchParams.get('status[]'),'0');
+   if(fail)return new Response('unavailable',{status:503});
+   return new Response('<a href="/procedure/B12345678/2" class="search-results__link--description">Услуги по выгрузке вагонов</a><button class="pagination__btn--next" data-href="?page=1"></button>');
+  };
+  db.exec("INSERT INTO owner(id) VALUES('1')");
+  await monitor.publicPoll(env,'roseltorg');
+  const s=db.prepare("SELECT * FROM sources WHERE id='roseltorg'").get();
+  assert.ok(s.last_ok);assert.equal(JSON.parse(s.cursor).pages[0],1);
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM outbox').get().n,1);
+  fail=true;db.exec("UPDATE sources SET next_at=0");
+  await monitor.publicPoll(env,'roseltorg');
+  assert.equal(db.prepare("SELECT cursor FROM sources WHERE id='roseltorg'").get().cursor,s.cursor);
+ }finally{global.fetch=old;db.close();}
+});
+test('Offer uses the verified Roseltorg lot and requires a named customer',()=>{
+ const {offer,questions}=require(path.join(tmp,'dialog.js'));
+ const answers=Object.fromEntries(questions.map(([key])=>[key,'1']));
+ const card={customer:'Заказчик',lot:'2',procedure:'1234'};
+ assert.throws(()=>offer(card,answers),/указан лот 2/);
+ answers.verified='2';
+ assert.equal(offer(card,answers).data.lot,'1234/2');
+ assert.throws(()=>offer({...card,customer:''},answers),/не указан заказчик/);
+});

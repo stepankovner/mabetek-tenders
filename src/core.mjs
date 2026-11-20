@@ -106,5 +106,49 @@ export function publicIndex(source,html) {
 
 export function serviceMatch(subject){
   const normal=subject.toLowerCase().replace(/ё/g,'е').replace(/ж\s*[/.-]\s*д/g,'жд');
-  return /(?:выгруз|разгруз|погруз|перевал|перегруз).{0,60}(?:вагон|груз)|погрузочно[-\s]разгрузоч|(?:прием|постановк).{0,35}вагон|(?:аренд|предоставлен).{0,55}(?:тупик|пут[иея]).{0,25}(?:железнодорож|необщего пользования)|хранени.{0,30}(?:с жд|с железнодорож)|(?:склад|площадк).{0,40}подъездн.{0,15}пут/u.test(normal);
+  const handling=/(?:выгруз|разгруз|погруз|перегруз|раскрыти).{0,60}(?:вагон|груз)|перевалк|погрузочно[-\s]разгрузоч|(?:прием|постановк).{0,35}(?:вагон|железнодорожн.{0,12}транспорт)|площадк.{0,24}перегруз/u;
+  if(handling.test(normal))return true;
+  if(/ремонт|строительств|реконструкц/u.test(normal))return false;
+  return /(?:аренд|предоставлен).{0,45}тупик|тупик.{0,25}исполнител|пут[а-яь]{1,4} необщего пользования|хранени.{0,30}(?:с жд|с железнодорож)|(?:склад|площадк).{0,40}подъездн.{0,15}пут/u.test(normal);
+}
+
+export function roseltorgCard(html,input){
+  const url=new URL(input);
+  const path=url.pathname.match(/^\/procedure\/([\w-]+)\/(\d+)\/?$/);
+  if(url.origin!=='https://www.roseltorg.ru'||!path)throw Error('Требуется ссылка на конкретный лот Росэлторга');
+  const [,procedure,lot]=path;
+  const starts=[...html.matchAll(/<div\b[^>]*class=["'][^"']*\blot-page__left-column-lot\b[^"']*["'][^>]*>/gi)];
+  const index=starts.findIndex(m=>m[0].includes('data-feature-favorite-lots-procedure-number="'+procedure+'"')&&m[0].includes('data-feature-favorite-lots-lot-number="'+lot+'"'));
+  if(index<0)throw Error('Лот не найден в оригинале');
+  const tail=html.slice(starts[index].index+starts[index][0].length);
+  let depth=1,end=-1;
+  for(const tag of tail.matchAll(/<\/?div\b[^>]*>/gi)){
+    depth+=tag[0][1]==='/'?-1:1;
+    if(depth===0){end=tag.index;break;}
+  }
+  if(end<0)throw Error('Неполный блок лота');
+  const block=tail.slice(0,end);
+  const clean=(s='')=>s.replace(/<[^>]+>/g,' ').replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&nbsp;|&#160;/g,' ').replace(/\s+/g,' ').trim();
+  const title=clean(block.match(/<h[12]\b[^>]*>([\s\S]*?)<\/h[12]>/i)?.[1]);
+  const customer=clean(block.match(/class="[^"]*js-seo-customer-name[^"]*"[^>]*>([\s\S]*?)<\/div>/i)?.[1]);
+  const rawPlace=clean(block.match(/class="lot-delivery__text[^"]*"[^>]*>\s*<div[^>]*>([\s\S]*?)<\/div>/i)?.[1]);
+  if(!title)throw Error('Предмет лота не распознан');
+  const amount=block.match(/class="lot-item__sum lot-price"[^>]*>([\s\S]*?)<\/div>/i)?.[1]||'';
+  const price=/itemprop="priceCurrency"\s+content="RUB"/.test(amount)?(amount.match(/itemprop="price"\s+content="([\d ]+(?:\.\d{1,2})?)"/)?.[1]||'').replace('.',','):'';
+  const registration=clean(block.match(/class="lot-start-registration lot-card-info"[^>]*>([\s\S]*?<\/div>\s*<div[^>]*>[\s\S]*?)<\/div>/i)?.[1]);
+  const clock=registration.match(/до\s+(\d{2}\.\d{2}\.)(\d{2}|\d{4})\s+(\d{2}:\d{2})\s*\(МСК\)/i);
+  const deadline=clock?clock[1]+(clock[2].length===2?'20':'')+clock[2]+' '+clock[3]+' МСК':'';
+  const badge=clean(block.match(/class="lot-status lot-status--[\w-]+"[^>]*>(?:\s*<div[^>]*><\/div>)?([\s\S]*?)<\/div>/i)?.[1]);
+  const status=badge.match(/При[её]м заявок|Процедура завершена|Процедура отменена|Работа комиссии|Приостановлена/i)?.[0]||'';
+  return {source:'roseltorg',procedure,lot,title,customer,place:/[а-я\d]/i.test(rawPlace)?rawPlace:'',region:'',price,deadline,status,url:url.origin+url.pathname};
+}
+
+export const construction=/^(?:устройство|ремонт|строительство|реконструкция|поставка запасных частей)(?:\s|$)/iu;
+export function catalogueMatch(title){
+  // Project names after these phrases describe the buyer's facility.
+  const subject=title.toLowerCase().split(/(?:для нужд|в рамках проекта|рамках проекта|для проекта|для объекта)/u)[0].trim();
+  const otherService=/(?:контролю за техническим состоянием|очистке от снега|предоставлению спецтехники и автотранспорта)/u;
+  if(otherService.test(subject)||construction.test(subject))return false;
+  if(/^поставка\s/u.test(subject)&&!/(?:с оказанием услуг|и оказание услуг|и услуги)\s/u.test(subject))return false;
+  return serviceMatch(subject);
 }

@@ -3,7 +3,7 @@ import {b2b,publicPoll} from './monitor';
 import {setup} from './setup';
 import {questions,validate,offer} from './dialog';
 // Cloudflare Worker. Aggregate RSS announcements stay separate from verified lots.
-import { readRzd } from './card';
+import { readCard } from './card';
 import { authorized, feed, identity, rzdTime, publicCatalogues, serviceMatch } from './core.mjs';
 
 interface Statement {
@@ -16,7 +16,7 @@ interface Env {
   DB:{prepare(sql:string):Statement;batch(sql:Statement[]):Promise<unknown>};
   RELEASE?:string; AI?:{run:Function}; WEBHOOK_SECRET:string; BOT_TOKEN:string; AGENT_KEY:string;
 }
-const help='/watch ссылка — разобрать извещение секции РЖД\n/status — источники и Mac\n/check — запросить обход\n/inbox — последние извещения\n/settings — управление агентом\n/semantic — смысловая подборка';
+const help='/watch ссылка — разобрать извещение РЖД или лот Росэлторга\n/status — источники и Mac\n/check — запросить обход\n/inbox — последние извещения\n/settings — управление агентом\n/semantic — смысловая подборка';
 const now=()=>Math.floor(Date.now()/1000);
 const sql=(e:Env,s:string,...p:unknown[])=>e.DB.prepare(s).bind(...p);
 const response=(body:unknown,status=200)=>Response.json(body,{status});
@@ -118,13 +118,14 @@ async function telegram(req:Request,e:Env){
   const fields=async(id:number,v:number)=>Object.fromEntries((await sql(e,'SELECT field,value FROM answers WHERE owner=? AND lot=? AND revision=?',user,id,v).all()).results.map(r=>[r.field,r.value]));
 
   switch(text.split(' ')[0]){
-    case '/watch':{
+    case '/ros':case '/watch':{
       try{
-        const c=await readRzd(text.slice(7).trim()), lot=await saveCard(e,c);
+        const input=text.startsWith('/ros ')?'https://www.roseltorg.ru/procedure/'+text.slice(5).trim():text.slice(7).trim();
+        const c=await readCard(input), lot=await saveCard(e,c);
         const time=rzdTime(c.deadline);
-        reply=[c.title,c.customer,'Статус: '+(c.status||'не указано'),'Место: '+(c.place||'не указано'),'НМЦ заказчика: '+(c.price?c.price+' руб.':'не указано'),'Срок: '+(time.utc?time.moscow+' МСК / '+time.khabarovsk+' Хабаровск':c.deadline||'не указано'),'Требуют уточнения: место исполнения и доступность площадки.'].join('\n');
+        reply=[c.title,c.customer||'Заказчик не указан','Статус: '+(c.status||'не указано'),'Место: '+(c.place||'не указано'),(c.source==='roseltorg'?'Цена лота в карточке: ':'НМЦ заказчика: ')+(c.price?c.price+' руб.':'не указано'),'Срок: '+(time.utc?time.moscow+' МСК / '+time.khabarovsk+' Хабаровск':c.deadline||'не указано'),'Требуют уточнения: место исполнения и доступность площадки.'].join('\n');
         markup={inline_keyboard:[[{text:'Оригинал',url:c.url},{text:'Документы',callback_data:'/documents '+lot.id+' '+lot.revision}],[{text:'Разобрать',callback_data:'/analyze '+lot.id+' '+lot.revision}],...decisionKeys(lot.id,lot.revision).inline_keyboard]};
-      }catch{reply='Не удалось прочитать карточку РЖД. Проверьте ссылку или доступность источника.';}
+      }catch{reply='Не удалось прочитать оригинал закупки. Проверьте ссылку или доступность источника.';}
       break;
     }
     case '/documents':{
@@ -133,8 +134,8 @@ async function telegram(req:Request,e:Env){
       if(!row){reply='Откройте актуальную карточку.';break;}
       const stored=JSON.parse(row.payload);
       try{
-        const current=await readRzd(stored.url);
-        const docs=current.documents||[];
+        const current=await readCard(stored.url);
+        const docs='documents' in current?current.documents||[]:[];
         const links=docs.slice(0,30).map((d:any)=>[{text:d.name.slice(0,60),url:d.url}]);
         links.push([{text:'Все документы в оригинале',url:stored.url}]);
         reply=docs.length?'Приложения к извещению: '+docs.length:'На странице не найдены ссылки на приложения.';
@@ -161,10 +162,12 @@ async function telegram(req:Request,e:Env){
       const [,id,v,signature]=text.split(' ');
       const row=await sql(e,'SELECT x.payload FROM lots l JOIN versions x ON x.lot=l.id AND x.revision=l.revision WHERE l.id=? AND l.revision=?',id||'',v||'').first();
       if(!row || await sql(e,'SELECT 1 FROM decisions WHERE owner=? AND lot=? AND revision=?',user,id||'',v||'').first()){reply='Подготовка остановлена или версия изменилась.';break;}
-      const card=JSON.parse(row.payload), details=offer(card,await fields(Number(id),Number(v)));
+      const card=JSON.parse(row.payload);
+      let details;
+      try{details=offer(card,await fields(Number(id),Number(v)));}catch(err){reply=(err as Error).message;break;}
       const digest=await hash(JSON.stringify(details.data));
       if(signature!==digest.slice(0,16)){reply='Сводка изменилась, перепроверьте условия.';break;}
-      const current=await readRzd(card.url).catch(()=>null);
+      const current=await readCard(card.url).catch(()=>null);
       const time=rzdTime(current?.deadline);
       if(!time.utc || Date.parse(time.utc)<=Date.now() || !/прием заявок/i.test((current?.status||'').replace(/ё/gi,'е')) || JSON.stringify(card)!==JSON.stringify(current)){
         reply='Выпуск остановлен. Срок, статус или актуальность карточки требуют проверки.';break;
@@ -222,11 +225,14 @@ async function telegram(req:Request,e:Env){
       }
       const values=await fields(lot,revision);
       try{values[field]=validate(field,text);}catch(err){reply=(err as Error).message;break;}
-      mutations.push(sql(e,'INSERT OR REPLACE INTO answers VALUES(?,?,?,?,?)',user,lot,revision,field,values[field]));
+      const saveAnswer=sql(e,'INSERT OR REPLACE INTO answers VALUES(?,?,?,?,?)',user,lot,revision,field,values[field]);
       const next=questions.find(([k])=>!values[k]);
-      if(next){mutations.push(sql(e,'UPDATE sessions SET field=? WHERE owner=?',next[0],user));reply=next[1];}
+      if(next){mutations.push(saveAnswer,sql(e,'UPDATE sessions SET field=? WHERE owner=?',next[0],user));reply=next[1];}
       else{
-        const details=offer(JSON.parse(session.payload),values), signature=(await hash(JSON.stringify(details.data))).slice(0,16);
+        let details;
+        try{details=offer(JSON.parse(session.payload),values);}catch(err){reply=(err as Error).message;break;}
+        mutations.push(saveAnswer);
+        const signature=(await hash(JSON.stringify(details.data))).slice(0,16);
         reply=details.summary;markup={inline_keyboard:[[{text:'Сформировать КП',callback_data:'/confirm '+lot+' '+revision+' '+signature},{text:'Исправить',callback_data:'/edit '+lot+' '+revision}]]};
         mutations.push(sql(e,'DELETE FROM sessions WHERE owner=?',user));
       }

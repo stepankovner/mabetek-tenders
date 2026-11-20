@@ -64,3 +64,18 @@ test('Original catalogues retain distinct lots and require recognised links',()=
  assert.throws(()=>core.publicIndex('gpb','<a href="https://other.test/front/procedure/view/x" class="vTitle">Запрос поставки</a>'));
  assert.throws(()=>core.publicIndex('tektorg','<title>Войдите</title>'));
 });
+test('Roseltorg reads only the selected lot and keeps unknown dates and addresses explicit',()=>{
+ const chunk=(n,s)=>'<div class="lot-page__left-column-lot" data-feature-favorite-lots-procedure-number="B1234" data-feature-favorite-lots-lot-number="'+n+'"><div class="lot-title"><h1>'+s+'</h1></div><div class="customer-name js-seo-customer-name"><a>Заказчик '+n+'</a></div><div class="lot-delivery__text"><div class="lot-expand-text__text">;;</div></div></div>';
+ const c=core.roseltorgCard(chunk(1,'Первый предмет')+chunk(2,'Второй предмет'),'https://www.roseltorg.ru/procedure/B1234/2');
+ assert.equal(c.title,'Второй предмет');assert.equal(c.customer,'Заказчик 2');assert.equal(c.lot,'2');assert.equal(c.place,'');assert.equal(c.deadline,'');
+});
+test('Облачный отбор улавливает прямо названные услуги, ремонт сам по себе не подходит',()=>{
+ for(const s of ['Аренда ж/д тупика','Путь необщего пользования исполнителя','Приём полувагонов на площадке','Приёмка с железнодорожного транспорта','Перевалка','Склад с подъездным путём','Раскрытие вагона','Площадка для перегрузки'])assert.ok(core.serviceMatch(s),s);
+ for(const s of ['Поставка колёс для вагонов','Ремонт пути необщего пользования','Поставка типовых ж/д вагонов'])assert.equal(core.serviceMatch(s),false,s);
+});
+test('Catalogue separates the purchase subject from its destination',async()=>{
+ const {catalogueMatch}=await import('../src/core.mjs');
+ assert.equal(catalogueMatch('Поставка насосов для нужд терминала по перевалке'),false);
+ assert.equal(catalogueMatch('Услуги по очистке от снега путей необщего пользования'),false);
+ assert.equal(catalogueMatch('Перевалка вагонов для нужд заказчика'),true);
+});
