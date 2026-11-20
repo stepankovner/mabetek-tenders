@@ -47,7 +47,8 @@ def main():
         request(config,"heartbeat",{"free_bytes":shutil.disk_usage(base).free})
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         if isinstance(exc, urllib.error.HTTPError):
-            reason = f"Worker вернул HTTP {exc.code}."
+            layer = "Приложение" if exc.headers.get_content_type()=="application/json" else "Шлюз"
+            reason = f"{layer} вернул HTTP {exc.code}."
         elif isinstance(exc, urllib.error.URLError):
             reason = ("Не удалось проверить сертификат HTTPS." if isinstance(exc.reason, ssl.SSLError)
                       else "Не удалось соединиться с Worker: "+type(exc.reason).__name__+".")
@@ -74,7 +75,6 @@ def main():
             subprocess.run(["launchctl","bootout",domain+"/"+LABEL],check=True)
     staging=plist.with_suffix(".new");staging.write_bytes(plistlib.dumps(data));staging.replace(plist)
     subprocess.run(["launchctl","bootstrap",domain,str(plist)],check=True)
-    subprocess.run(["launchctl","kickstart","-k",domain+"/"+LABEL],check=True)
     subprocess.run(["launchctl","print",domain+"/"+LABEL],check=True,stdout=subprocess.DEVNULL)
     print("Автозапуск зарегистрирован. Статус соединения доступен в Telegram по /status.")
 

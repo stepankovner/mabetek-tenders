@@ -16,6 +16,7 @@ import tempfile
 
 CONFIG=Path(os.environ.get("MABETEK_AGENT_CONFIG",Path.home()/"Library/Application Support/mabetek-tenders/agent.json"))
 LABEL="ru.mabetek.tenders.agent"
+USER_AGENT="Mabetek-Tenders/1.0"
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args):return None
@@ -34,7 +35,7 @@ def settings():
     return conf
 
 def request(conf,path,data):
-    req=urllib.request.Request(conf["worker"].rstrip("/")+"/agent/"+path,json.dumps(data).encode(),{"Authorization":"Bearer "+conf["key"],"Content-Type":"application/json"})
+    req=urllib.request.Request(conf["worker"].rstrip("/")+"/agent/"+path,json.dumps(data).encode(),{"User-Agent":USER_AGENT,"Authorization":"Bearer "+conf["key"],"Content-Type":"application/json"})
     with urllib.request.build_opener(NoRedirect()).open(req,timeout=30) as res: return json.load(res)
 
 def tick(conf):
@@ -49,7 +50,7 @@ def tick(conf):
             terms=json.loads(job["input"])
             demo=any("демонстрацион" in str(terms.get(k,"")).lower() for k in ("terms","dates","validity","vat"))
             render(terms,out,template=conf["template"],demo=demo)
-            req=urllib.request.Request(conf["worker"].rstrip("/")+"/agent/pdf",out.read_bytes(),{"Authorization":"Bearer "+conf["key"],"x-job":str(job["id"]),"x-lease":job["lease"],"Content-Type":"application/pdf"})
+            req=urllib.request.Request(conf["worker"].rstrip("/")+"/agent/pdf",out.read_bytes(),{"User-Agent":USER_AGENT,"Authorization":"Bearer "+conf["key"],"x-job":str(job["id"]),"x-lease":job["lease"],"Content-Type":"application/pdf"})
             with urllib.request.build_opener(NoRedirect()).open(req,timeout=50) as res:res.read()
         return
     verdict,reason=classify(card.get("title","")+" "+card.get("description",""),card.get("place",""))
