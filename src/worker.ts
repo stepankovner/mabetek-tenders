@@ -1,7 +1,9 @@
+import {b2b} from './monitor';
+import {setup} from './setup';
 import {questions,validate,offer} from './dialog';
 // Cloudflare Worker. Aggregate RSS announcements stay separate from verified lots.
 import { readRzd } from './card';
-import { authorized, feed, identity } from './core.mjs';
+import { authorized, feed, identity, rzdTime } from './core.mjs';
 
 interface Statement {
   bind(...args:unknown[]):Statement;
@@ -97,6 +99,7 @@ async function telegram(req:Request,e:Env){
   }
   const owner=await sql(e,'SELECT id FROM owner').first();
   if(!authorized(msg.chat,id,owner?.id))return response({});
+  if(cb?.id) await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/answerCallbackQuery',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({callback_query_id:cb.id}),signal:AbortSignal.timeout(5000)}).catch(()=>undefined);
   if(await sql(e,'SELECT 1 FROM updates WHERE id=?',u.update_id).first())return response({});
   let reply=help;
   let markup:unknown=undefined;
@@ -109,7 +112,8 @@ async function telegram(req:Request,e:Env){
     case '/watch':{
       try{
         const c=await readRzd(text.slice(7).trim()), lot=await saveCard(e,c);
-        reply=[c.title,c.customer,'Статус: '+(c.status||'не указано'),'Место: '+(c.place||'не указано'),'НМЦ заказчика: '+(c.price||'не указано'),'Срок: '+(c.deadline||'не указано'),'Требуют уточнения: место исполнения и доступность площадки.'].join('\n');
+        const time=rzdTime(c.deadline);
+        reply=[c.title,c.customer,'Статус: '+(c.status||'не указано'),'Место: '+(c.place||'не указано'),'НМЦ заказчика: '+(c.price?c.price+' руб.':'не указано'),'Срок: '+(time.utc?time.moscow+' МСК / '+time.khabarovsk+' Хабаровск':c.deadline||'не указано'),'Требуют уточнения: место исполнения и доступность площадки.'].join('\n');
         markup={inline_keyboard:[[{text:'Оригинал',url:c.url},{text:'Разобрать',callback_data:'/analyze '+lot.id+' '+lot.revision}],...decisionKeys(lot.id,lot.revision).inline_keyboard]};
       }catch{reply='Не удалось прочитать карточку РЖД. Проверьте ссылку или доступность источника.';}
       break;
@@ -137,8 +141,8 @@ async function telegram(req:Request,e:Env){
       const digest=await hash(JSON.stringify(details.data));
       if(signature!==digest.slice(0,16)){reply='Сводка изменилась, перепроверьте условия.';break;}
       const current=await readRzd(card.url).catch(()=>null);
-      const dt=current?.deadline?.match(/^(\d{2})\.(\d{2})\.(\d{4}) (\d{2}):(\d{2}) МСК$/);
-      if(!dt || Date.parse(dt[3]+'-'+dt[2]+'-'+dt[1]+'T'+dt[4]+':'+dt[5]+':00+03:00')<=Date.now() || !/прием заявок/i.test((current?.status||'').replace(/ё/gi,'е')) || JSON.stringify(card)!==JSON.stringify(current)){
+      const time=rzdTime(current?.deadline);
+      if(!time.utc || Date.parse(time.utc)<=Date.now() || !/прием заявок/i.test((current?.status||'').replace(/ё/gi,'е')) || JSON.stringify(card)!==JSON.stringify(current)){
         reply='Выпуск остановлен. Срок, статус или актуальность карточки требуют проверки.';break;
       }
       mutations.push(sql(e,"INSERT OR IGNORE INTO jobs(lot,revision,op,input) VALUES(?,?,?,?)",id,v,'pdf/'+digest,JSON.stringify(details.data)));
@@ -152,12 +156,13 @@ async function telegram(req:Request,e:Env){
       reply='Задача разбора зарегистрирована. Состояние Mac доступно в /status.';break;
     }
     case '/check':
-      await poll(e);reply='Проверка обработана с учётом интервала опроса. Результат в /status.';break;
+      await Promise.all([poll(e),b2b(e)]);reply='Проверка обработана с учётом интервала опроса. Результат в /status.';break;
     case '/status':{
       const s=await sql(e,'SELECT * FROM sources WHERE id=?','eis').first();
+      const b=await sql(e,"SELECT * FROM sources WHERE id='b2b'").first();
       const a=await sql(e,'SELECT * FROM agent_state WHERE id=1').first();
       const count=await sql(e,"SELECT count(*) AS n,min(created) AS oldest FROM jobs WHERE state IN ('queued','running')").first();
-      reply='ЕИС: '+(s?.last_error || (s?.last_ok?'выдача прочитана':'проверки ещё не было'))+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nВозраст старейшей, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nРасход аккаунта: нет телеметрии.';break;
+      reply='ЕИС: '+(s?.last_error || (s?.last_ok?'выдача прочитана':'проверки ещё не было'))+'\nB2B-Center: '+(b?.last_error||b?.cursor||'проверки ещё не было')+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nВозраст старейшей, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nРасход аккаунта: нет телеметрии.';break;
     }
     case '/inbox':{
       const {results}=await sql(e,'SELECT title,url FROM notices ORDER BY updated DESC LIMIT 5').all();
@@ -244,10 +249,11 @@ async function agent(req:Request,e:Env,path:string) {
 export default {
   async fetch(req:Request,e:Env){
     const path=new URL(req.url).pathname;
+    if(path==='/setup')return setup(req,e,same,hash);
     if(req.method!=='POST')return response({},404);
     if(path==='/telegram')return telegram(req,e);
     if(path.startsWith('/agent/'))return agent(req,e,path);
     return response({},404);
   },
-  async scheduled(_event:unknown,e:Env){await poll(e);await deliver(e);}
+  async scheduled(_event:unknown,e:Env){await Promise.all([poll(e),b2b(e)]);await deliver(e);}
 };
