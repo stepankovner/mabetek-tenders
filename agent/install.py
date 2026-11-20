@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import ssl
 from pathlib import Path
 
 from .daemon import LABEL, request, settings
@@ -43,8 +45,22 @@ def main():
     try:
         config=settings()
         request(config,"heartbeat",{"free_bytes":shutil.disk_usage(base).free})
-    except Exception as e:
-        raise SystemExit("Первичная проверка не прошла: "+type(e).__name__+". Проверьте связку ключей и интернет.") from None
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        if isinstance(exc, urllib.error.HTTPError):
+            reason = f"Worker вернул HTTP {exc.code}."
+        elif isinstance(exc, urllib.error.URLError):
+            reason = ("Не удалось проверить сертификат HTTPS." if isinstance(exc.reason, ssl.SSLError)
+                      else "Не удалось соединиться с Worker: "+type(exc.reason).__name__+".")
+        elif isinstance(exc, ValueError):
+            reason = str(exc)
+        else:
+            reason = type(exc).__name__
+        (base/"install-status.txt").write_text(reason+"\n")
+        if not isinstance(exc, urllib.error.URLError):
+            raise SystemExit("Первичная проверка: "+reason) from None
+        print(reason+" Агент повторит подключение после запуска.",flush=True)
+    else:
+        (base/"install-status.txt").write_text("Первый контакт с Worker подтверждён.\n")
     domain="gui/"+str(os.getuid())
     plist=Path.home()/"Library/LaunchAgents"/(LABEL+".plist")
     plist.parent.mkdir(parents=True,exist_ok=True)
@@ -60,6 +76,6 @@ def main():
     subprocess.run(["launchctl","bootstrap",domain,str(plist)],check=True)
     subprocess.run(["launchctl","kickstart","-k",domain+"/"+LABEL],check=True)
     subprocess.run(["launchctl","print",domain+"/"+LABEL],check=True,stdout=subprocess.DEVNULL)
-    print("Агент установлен. Первый контакт с Worker подтверждён. Статус доступен в Telegram.")
+    print("Автозапуск зарегистрирован. Статус соединения доступен в Telegram по /status.")
 
 if __name__=="__main__":main()

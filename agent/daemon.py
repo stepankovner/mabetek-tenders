@@ -27,7 +27,7 @@ def settings():
     url=urlsplit(conf["worker"])
     if url.scheme!="https" or not url.hostname or url.username or url.password or url.path not in ("","/"): raise ValueError("Требуется HTTPS адрес Worker")
     if "key" not in conf:
-        keychain=subprocess.run(["/usr/bin/security","find-generic-password","-s","mabetek-tenders.agent","-a","mabetek-tenders.agent","-w"],capture_output=True,text=True,timeout=30)
+        keychain=subprocess.run(["/usr/bin/security","find-generic-password","-s","mabetek-tenders.agent","-w"],capture_output=True,text=True,timeout=30)
         if keychain.returncode: raise ValueError("Нет доступа к ключу агента в связке Вход")
         conf["key"]=keychain.stdout.strip()
     if len(conf["key"])<32: raise ValueError("Короткий ключ агента")
@@ -82,7 +82,8 @@ def main():
     while True:
         try:tick(settings())
         except (OSError,ValueError,KeyError) as e:
-            print("Агент:",type(e).__name__,file=sys.stderr,flush=True)
+            detail = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
+            print(time.strftime("%Y-%m-%d %H:%M:%S"),"Агент:",detail,file=sys.stderr,flush=True)
             if args.once:raise SystemExit(1)
         if args.once:return
         time.sleep(45)
