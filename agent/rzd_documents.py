@@ -72,6 +72,23 @@ def summarize(rows):
         found.append(f"{row['file']}, {row['location']}: {text[:250]}")
     return '\n'.join(found[:2])
 
+def form_evidence(rows):
+    headings = re.compile(r'^форма (?:сведений об участнике|технического предложения|сведений о персонале|согласия на обработку персональных данных|ценового предложения)\b', re.I)
+    format_rule = re.compile(r'^техническое предложение оформляется.{0,240}в формате MS Word', re.I)
+    vat_rule = re.compile(r'применяемая ставка НДС составляет [_ ]+ процентов', re.I)
+    result = []
+    seen = set()
+    for row in rows:
+        line = ' '.join(row['text'].split())
+        match = headings.match(line) or format_rule.match(line) or vat_rule.search(line)
+        if match and match.group().casefold() not in seen:
+            result.append(f"{row['file']}, {row['location']}: {line[:220]}")
+            seen.add(match.group().casefold())
+    if not result:
+        return ''
+    return 'Формы заказчика:\n' + '\n'.join(result[:7])
+
+
 def review(card, cache):
     url = urlsplit(card['url'])
     ident = parse_qs(url.query).get('tenderId',[''])[0]
@@ -102,7 +119,7 @@ def review(card, cache):
             for row in rows:
                 row['file'] = name
             fragments.extend(select_fragments(rows))
-            evidence = summarize(rows)
+            evidence = "\n".join(filter(None, (summarize(rows), form_evidence(rows))))
             index = dict(name=name,url=link,sha256=digest,excerpts=evidence)
             with tempfile.NamedTemporaryFile(dir=cache,mode='w',encoding='utf8',delete=False) as f:
                 json.dump(index,f,ensure_ascii=False)

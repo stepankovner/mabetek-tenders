@@ -30,3 +30,17 @@ class Analysis(unittest.TestCase):
         text=analysis_message(card,'Оригинал с приложениями недоступен.')
         self.assertIn('допускается ли площадка исполнителя',text.lower())
         self.assertNotIn('точное место установлено',text.lower())
+
+class CustomerForms(unittest.TestCase):
+    def test_requirements_have_source_and_location(self):
+        from agent.rzd_documents import form_evidence
+        rows=[dict(file='Извещение.doc',location='строка '+str(i),text=t) for i,t in enumerate([
+            'Форма технического предложения участника;', 'Форма технического предложения участника;',
+            'Техническое предложение оформляется отдельно по каждому лоту в формате MS Word',
+            '2. Применяемая ставка НДС составляет ____ процентов.',
+            'Иванов Иван, персональные сведения'])]
+        result=form_evidence(rows)
+        self.assertEqual(result.count('Форма технического предложения'),1)
+        self.assertIn('строка 2',result)
+        self.assertIn('строка 3',result)
+        self.assertNotIn('Иванов',result)
