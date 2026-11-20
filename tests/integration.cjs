@@ -71,3 +71,11 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    assert.equal(db.prepare('select state from offers').get().state,'устарело');
  }finally{global.fetch=original;db.close();}
 });
+test('Registration accepts same-site form with opaque Origin but requires the agent key',async()=>{
+  const {env,db}=fixture();
+  try{
+    const make=(origin,site)=>new Request('https://test.invalid/setup',{method:'POST',headers:{origin,'sec-fetch-site':site},body:new URLSearchParams({key:'wrong'})});
+    assert.equal(await (await worker.fetch(make('null','same-origin'),env)).text(),'Доступ запрещён');
+    assert.equal(await (await worker.fetch(make('https://other.invalid','cross-site'),env)).text(),'Недоступно');
+  }finally{db.close();}
+});

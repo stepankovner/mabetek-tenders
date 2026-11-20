@@ -29,3 +29,28 @@ export function rzdCard(html,url) {
   if(!title||!customer||!get('Площадка')) throw Error('Не распознана карточка РЖД');
   return {source:'rzd-rts',procedure:u.searchParams.get('tenderId'),lot:'процедура',title,customer,place:get('Место поставки'),region:get('Регион'),price:get('НМЦ'),deadline:get('Дата окончания подачи заявок'),status:get('Статус на площадке'),url:u.href};
 }
+
+// The RZD procurement section publishes its clocks in Moscow time (UTC+3).
+export function rzdTime(raw) {
+  const m=String(raw||'').trim().match(/^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})(?:\s+МСК)?$/i);
+  const unknown={original:raw,utc:null,khabarovsk:null};
+  if(!m || +m[4]>23 || +m[5]>59)return unknown;
+  const ms=Date.UTC(+m[3],+m[2]-1,+m[1],+m[4]-3,+m[5]);
+  function local(h){
+    const d=new Date(ms+h*3600000).toISOString();
+    return d.slice(8,10)+'.'+d.slice(5,7)+'.'+d.slice(0,4)+' '+d.slice(11,16);
+  }
+  if(local(3)!==m[1]+'.'+m[2]+'.'+m[3]+' '+m[4]+':'+m[5])return unknown;
+  return {original:raw,utc:new Date(ms).toISOString(),moscow:local(3),khabarovsk:local(10)};
+}
+
+export function b2bIndex(html) {
+  const unique=new Map();
+  for(const a of html.matchAll(/<a\b[^>]*\bhref=["']([^"']+\/tender-(\d+)\/(?:\?[^"']*)?)["']/gi)){
+    const url=new URL(a[1].replace(/&amp;/g,'&'),'https://www.b2b-center.ru');
+    if(url.origin!=='https://www.b2b-center.ru' || !/^\/(?:app\/market-next|market)\//.test(url.pathname))continue;
+    unique.set(a[2],{id:a[2],url:url.origin+url.pathname});
+  }
+  if(!unique.size && !/(?:ничего не найдено|по вашему запросу.*не найдено)/i.test(html))throw Error('Не распознана выдача B2B-Center');
+  return [...unique.values()];
+}
