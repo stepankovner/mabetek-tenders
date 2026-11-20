@@ -1,0 +1,12 @@
+.private/
+.env*
+.dev.vars*
+.wrangler/
+node_modules/
+__pycache__/
+*.sqlite*
+*.pdf
+*.doc
+*.docx
+*.xlsx
+*.log

@@ -1,0 +1,17 @@
+PRAGMA foreign_keys=ON;
+CREATE TABLE profile(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+CREATE TABLE sources(id TEXT PRIMARY KEY,url TEXT NOT NULL,cursor TEXT,last_ok INTEGER,last_error TEXT,next_at INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE lots(id INTEGER PRIMARY KEY,canonical TEXT UNIQUE NOT NULL,procedure_no TEXT NOT NULL,lot_no TEXT NOT NULL,revision INTEGER NOT NULL,deadline TEXT,status TEXT NOT NULL);
+CREATE INDEX lots_due ON lots(status,deadline);
+CREATE TABLE versions(lot INTEGER REFERENCES lots,revision INTEGER,digest TEXT NOT NULL,payload TEXT NOT NULL,seen INTEGER NOT NULL,PRIMARY KEY(lot,revision));
+CREATE TABLE links(lot INTEGER REFERENCES lots,source TEXT,url TEXT,PRIMARY KEY(lot,source,url));
+CREATE TABLE documents(lot INTEGER REFERENCES lots,revision INTEGER,url TEXT,sha256 TEXT,state TEXT,PRIMARY KEY(lot,revision,url));
+CREATE TABLE evidence(lot INTEGER REFERENCES lots,revision INTEGER,location TEXT,text TEXT,sha256 TEXT);
+CREATE TABLE sessions(owner TEXT PRIMARY KEY,lot INTEGER REFERENCES lots,revision INTEGER,field TEXT);
+CREATE TABLE answers(owner TEXT,lot INTEGER REFERENCES lots,revision INTEGER,field TEXT,value TEXT,PRIMARY KEY(owner,lot,revision,field));
+CREATE TABLE jobs(id INTEGER PRIMARY KEY,lot INTEGER REFERENCES lots,revision INTEGER,op TEXT,state TEXT DEFAULT 'queued',lease TEXT,until_ts INTEGER DEFAULT 0,attempts INTEGER DEFAULT 0,created INTEGER DEFAULT(unixepoch()),UNIQUE(lot,revision,op));
+CREATE INDEX jobs_due ON jobs(state,until_ts,created);
+CREATE TABLE offers(id INTEGER PRIMARY KEY,lot INTEGER REFERENCES lots,revision INTEGER,digest TEXT,state TEXT);
+CREATE TABLE updates(id INTEGER PRIMARY KEY,seen INTEGER DEFAULT(unixepoch()));
+CREATE TABLE outbox(id INTEGER PRIMARY KEY,dedupe TEXT UNIQUE,owner TEXT,payload TEXT NOT NULL,state TEXT DEFAULT 'ready',message_id INTEGER,created INTEGER DEFAULT(unixepoch()));
+CREATE INDEX outbox_state ON outbox(state,id);
