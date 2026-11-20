@@ -1,3 +1,4 @@
+import {draftWord,supportsForm,verifyOriginal} from './rzd-form';
 import {rankNotices} from './semantic';
 import {b2b,publicPoll,macCatalogue} from './monitor';
 import {setup} from './setup';
@@ -83,7 +84,17 @@ async function deliver(e:Env) {
     // Persist uncertainty before sending. Never resend a possible successful delivery automatically.
     const m=await sql(e,"UPDATE outbox SET state='uncertain' WHERE id=(SELECT id FROM outbox WHERE state='ready' ORDER BY id LIMIT 1) RETURNING *").first();
     if(!m)return;
-    const r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:m.owner,...JSON.parse(m.payload)}),signal:AbortSignal.timeout(10000)});
+    const payload=JSON.parse(m.payload);
+    let r:Response;
+    if(payload.word){
+      const {lot,vat}=payload.word;
+      const draft=draftWord(lot,vat),form=new FormData();
+      form.set('chat_id',m.owner);form.set('document',draft.file,'RZD-32616584495-lot-'+lot+'.docx');
+      form.set('caption','Черновик технического предложения РЖД. '+(draft.filled?'Ставка НДС перенесена из ваших условий.':'Поле ставки НДС оставлено пустым. Подтвердите его заполнение вручную.')+' Проверьте пункт 1 о полном соответствии ТЗ и место оказания услуг до подачи. Сведения об участнике, персонале и согласия оформляются отдельно.');
+      r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendDocument',{method:'POST',body:form,signal:AbortSignal.timeout(10000)});
+    }else{
+      r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:m.owner,...payload}),signal:AbortSignal.timeout(10000)});
+    }
     if(r.ok){
       const ack=await r.json() as any;
       if(ack.ok){
@@ -197,14 +208,28 @@ async function telegram(req:Request,e:Env){
       mutations.push(sql(e,'INSERT OR REPLACE INTO sessions VALUES(?,?,?,?)',user,id,v,field));
       reply=field==='reject'?'Почему лот не подходит?':missing[1];break;
     }
-    case '/transfer':{
+    case '/word':case '/transfer':{
       const [,lot,v]=text.split(' ');
       const row=await sql(e,'SELECT x.payload FROM lots l JOIN versions x ON x.lot=l.id AND x.revision=l.revision WHERE l.id=? AND l.revision=?',lot||'',v||'').first();
       if(!row){reply='Карточка обновилась. Откройте текущую версию.';break;}
       if(await sql(e,'SELECT 1 FROM decisions WHERE owner=? AND lot=? AND revision=?',user,lot,v).first()){reply='Подготовка лота остановлена.';break;}
       try{
         const card=JSON.parse(row.payload);
-        const info=offer(card,await fields(Number(lot),Number(v)));
+        const answers=await fields(Number(lot),Number(v)), info=offer(card,answers);
+        const signature=(await hash(JSON.stringify(info.data))).slice(0,16);
+        if(text.startsWith('/word ')){
+          if(text.split(' ')[3]!==signature || !supportsForm(card)){reply='Откройте актуальную сводку условий.';break;}
+          const current=await readCard(card.url);
+          if(JSON.stringify(current)!==JSON.stringify(card)||!await verifyOriginal()){reply='Не удалось подтвердить исходную форму. Откройте оригинал и проверьте приложения.';break;}
+          const draft=draftWord(answers.verified,answers.vat);
+          const dedupe='word/'+user+'/'+lot+'/'+v+'/'+signature;
+          const previous=await sql(e,'SELECT state FROM outbox WHERE dedupe=?',dedupe).first();
+          if(previous){reply=previous.state==='sent'?'Эта версия формы уже отправлена в чат.':'Эта версия формы уже поставлена на отправку. Проверьте историю чата.';break;}
+          mutations.push(sql(e,'INSERT OR IGNORE INTO outbox(dedupe,owner,payload) VALUES(?,?,?)',dedupe,user,JSON.stringify({word:{lot:answers.verified,vat:answers.vat}})));
+          reply=draft.filled?'Подготовлен черновик Word со ставкой из ваших условий.':'Подготовлен черновик Word. Требуется ручное заполнение поля НДС.';
+          break;
+        }
+        if(supportsForm(card))markup={inline_keyboard:[[{text:'Получить черновик формы Word',callback_data:'/word '+lot+' '+v+' '+signature}]]};
         reply=['Значения для переноса в форму заказчика',info.summary,'Сведения о персонале, согласия и подпись заполняются отдельно.','Оригинал: '+card.url].join('\n');
       }catch(err){reply=(err as Error).message;}
       break;

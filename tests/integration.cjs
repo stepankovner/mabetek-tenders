@@ -265,3 +265,19 @@ test('Unreadable Roseltorg card reaches Mac once and returns to the owner chat',
   assert.equal(db.prepare('SELECT count(*) n FROM lots').get().n,1);
  }finally{global.fetch=old;db.close();}
 });
+
+test('Черновик РЖД открывается как DOCX и переносит только однозначную ставку',async()=>{
+ const {draftWord}=require(path.join(tmp,'rzd-form.js'));
+ for(const [vat,filled] of [['22% в том числе',true],['без НДС',false],['0%',true],['не 20%',false],['5% или 7%',false]]){
+   const draft=draftWord('1',vat);
+   assert.equal(draft.filled,filled);
+   const doc=Buffer.from(await draft.file.arrayBuffer());
+   const content=execFileSync('python3',['-c',`import sys,io,zipfile,xml.etree.ElementTree as E
+z=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read()))
+assert z.testzip() is None
+print(''.join(E.fromstring(z.read('word/document.xml')).itertext()))`],{input:doc}).toString();
+   assert.match(content,/Черновик.*32616584495, лот 1/);
+   assert.ok(content.includes('составляет '+(filled?vat.split('%')[0]:'____')+' процентов'));
+ }
+ assert.throws(()=>draftWord('<2','0%'));
+});
