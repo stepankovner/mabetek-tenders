@@ -86,12 +86,28 @@ export function b2bTitle(html,id) {
 }
 
 export const publicCatalogues={
+  sberWorld:{name:'Сбербанк-АСТ · международная секция',url:'https://world.sberbank-ast.ru/tableForm.aspx?formCode=PurchaseList'},
   roseltorg:{name:'Росэлторг',url:'https://www.roseltorg.ru/procedures/search'},
   tektorg:{name:'ТЭК-Торг',url:'https://www.tektorg.ru/procedures'},
   gpb:{name:'ЭТП ГПБ',url:'https://etpgpb.ru/procedures/'}
 };
 
+export function sberRegistry(html){
+  const xml=html.replace(/&lt;/g,'<').replace(/&gt;/g,'>');
+  const rows=[];
+  for(const [,block] of xml.matchAll(/<Purchase>([\s\S]*?)<\/Purchase>/g)){
+    const field=key=>block.match(new RegExp('<'+key+'>([\\s\\S]*?)</'+key+'>','i'))?.[1]?.trim()||'';
+    const id=field('PurchaseID'), title=field('PurchaseName'), status=field('purchStatus');
+    const link=field('purchHref').replace(/&amp;(?:amp;)?/g,'&');
+    if(!/^\d+$/.test(id)||link!=='/documentView.aspx?formCode=PurchaseInfo&id='+id||!title||!status)throw Error('Не распознана карточка Сбербанк-АСТ');
+    rows.push({title:title.replace(/&amp;quot;|&quot;/g,'"').replace(/&amp;/g,'&'),url:'https://world.sberbank-ast.ru'+link,status});
+  }
+  if(!rows.length)throw Error('Не распознан реестр Сбербанк-АСТ');
+  return rows;
+}
 export function publicIndex(source,html) {
+  if(source==='sberWorld')return sberRegistry(html).filter(r=>/^(?:Bids submission|Submission of bids|Accepting bids)$/i.test(r.status));
+
   const catalogue=publicCatalogues[source];
   const found=new Map();
   for(const [,attrs,body] of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)){

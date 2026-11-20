@@ -79,3 +79,10 @@ test('Catalogue separates the purchase subject from its destination',async()=>{
  assert.equal(catalogueMatch('Услуги по очистке от снега путей необщего пользования'),false);
  assert.equal(catalogueMatch('Перевалка вагонов для нужд заказчика'),true);
 });
+test('Sber international registry keeps closed bids out of active notices',()=>{
+ const row=status=>'&lt;Purchase>&lt;PurchaseID>850&lt;/PurchaseID>&lt;PurchaseName>Приём вагонов&lt;/PurchaseName>&lt;purchStatus>'+status+'&lt;/purchStatus>&lt;purchHref>/documentView.aspx?formCode=PurchaseInfo&amp;amp;id=850&lt;/purchHref>&lt;/Purchase>';
+ assert.equal(core.sberRegistry(row('Cancelled'))[0].url,'https://world.sberbank-ast.ru/documentView.aspx?formCode=PurchaseInfo&id=850');
+ assert.deepEqual(core.publicIndex('sberWorld',row('Summing up of the bidding')),[]);
+ assert.equal(core.publicIndex('sberWorld',row('Bids submission')).length,1);
+ assert.throws(()=>core.publicIndex('sberWorld','unavailable'));
+});
