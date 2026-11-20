@@ -179,6 +179,11 @@ export function roseltorgCard(html,input){
 export const construction=/^(?:устройство|ремонт|строительство|реконструкция|поставка запасных частей)(?:\s|$)/iu;
 export function infrastructureOnly(title){
   const subject=title.toLowerCase().replace(/^окпд(?:2|\s*2)?\s*[\d.]+[.:\s]*/u,'').trim();
+  const trackMaintenance=/^(?:оказание услуг по |работы по )?(?:текущ(?:ее|ему) )?содержани(?:е|ю) (?:железнодорожных|ж\/д) путей/u.test(subject);
+  const demolition=/^(?:выполнение комплекса работ[:\s]+)?(?:1[.)]\s*)?демонтаж здания склада/u.test(subject);
+  if(trackMaintenance || demolition){
+    return !/(?:при[её]м|выгрузк|погрузк|постановк|перевалк|аренд|предоставлени)[а-яё]*\s+(?:[а-яё-]+\s+){0,3}(?:вагон|груз|тупик|пут)/u.test(subject);
+  }
   // These words describe sale of the asset or preparation of engineering documentation.
   return /^продажа\s+железнодорожных путей(?:\s|[.,;:]|$)/u.test(subject) ||
     /^(?:оказание услуг по разработке|разработка)\s+инструкции о порядке обслуживания движения/u.test(subject);
