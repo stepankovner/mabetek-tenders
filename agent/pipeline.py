@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree as ET
 
 import pymupdf
+from .ocr import recognize
 
 MAX_BYTES = 32 * 1024 * 1024
 SERVICE = re.compile(r"тупик|пут[ьи].{0,18}необщего|постановк.{0,20}вагон|прием.{0,26}(?:вагон|железнодорож)|перевалк|(?:выгрузк|погрузк).{0,40}(?:вагон|груз)|склад.{0,30}(?:подъездн|железнодорож|жд)|перегрузк|\bпрр\b")
@@ -45,7 +46,7 @@ def _extract(name, data, depth, budget):
             for n,p in enumerate(pdf,1):
                 text=p.get_text().strip()
                 if not text:
-                    try: text=p.get_text(textpage=p.get_textpage_ocr(language="rus+eng",dpi=150,full=True))
+                    try: text=recognize(p)
                     except RuntimeError as e: raise ValueError(f"Нужен OCR rus+eng, страница {n}") from e
                     rows.append(row(f"страница {n}",text,True))
                 else: rows.append(row(f"страница {n}",text))
@@ -128,9 +129,9 @@ def render(data, output, *, demo=False, template=None):
     with pymupdf.open(stream=buf.getvalue(),filetype="pdf") as pdf:
         if template:
             with pymupdf.open(template) as brand:
-                # Raster clips exclude unrelated objects and text outside the contact strips.
+                original=brand[0]
+                original.add_redact_annot(pymupdf.Rect(0,52,original.rect.width,708),fill=(1,1,1))
+                original.apply_redactions()
                 for page in pdf:
-                    for area in (pymupdf.Rect(0,0,595,52),pymupdf.Rect(0,708,595,838)):
-                        pix=brand[0].get_pixmap(clip=area,matrix=pymupdf.Matrix(2,2))
-                        page.insert_image(area,pixmap=pix)
+                    page.show_pdf_page(page.rect,brand,0,overlay=False)
         pdf.save(output)
