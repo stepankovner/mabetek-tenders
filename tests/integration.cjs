@@ -53,6 +53,11 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    await talk('/start fixture-pairing',2);
    assert.equal(sent.length,1);
    await talk('/watch '+card);const n=sent.length;await talk('/watch '+card,1,seq);assert.equal(sent.length,n);
+   const liveCard=sent.at(-1);
+   const docsButton=liveCard.reply_markup.inline_keyboard.flat().find(b=>b.text==='Документы');
+   assert.ok(docsButton);
+   await talk(docsButton.callback_data);
+   assert.match(sent.at(-1).text,/приложени/i);
    await talk('/analyze 1 1');await talk('/analyze 1 1');
    const job=await agent('claim',{});assert.equal(job.op,'analysis');assert.equal(await agent('claim',{}),null);
    await agent('result',{id:job.id,lease:job.lease,text:'результат'});
@@ -121,4 +126,23 @@ test('Scheduled EIS poll sends a matching notice once and skips unrelated suppli
    assert.match(sent[0],/выгрузке вагонов/);
    assert.equal(db.prepare('SELECT count(*) n FROM notices').get().n,2);
  }finally{global.fetch=previous;db.close();}
+});
+test('Semantic queue survives quota errors, caches profile and updates edited notices',async()=>{
+ const {db,env}=fixture();
+ const {rankNotices}=require(path.join(tmp,'semantic.js'));
+ db.prepare("INSERT INTO notices(url,title,updated) VALUES(?,?,1)").run('https://zakupki.gov.ru/a','Приём гружёных вагонов');
+ const calls=[];
+ let down=true;
+ env.AI={run:async(model,args)=>{calls.push(args.text);if(down)throw Error('quota');return {data:args.text.map((s,i)=>[1,1+i])};}};
+ try{
+   await rankNotices(env);assert.equal(db.prepare('SELECT count(*) AS n FROM semantic_results').get().n,0);
+   down=false;
+   await rankNotices(env);assert.equal(db.prepare('SELECT count(*) AS n FROM semantic_results').get().n,1);
+   const n=calls.length;
+   await rankNotices(env);assert.equal(calls.length,n);
+   db.exec("UPDATE notices SET updated=2,title='Уточнённый предмет'");
+   await rankNotices(env);
+   assert.equal(calls.length,n+1);assert.equal(calls.at(-1).length,1);
+   assert.equal(db.prepare('SELECT source_updated FROM semantic_results').get().source_updated,2);
+ }finally{db.close();}
 });

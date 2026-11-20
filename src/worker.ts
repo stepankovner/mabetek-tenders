@@ -1,9 +1,10 @@
-import {b2b} from './monitor';
+import {rankNotices} from './semantic';
+import {b2b,publicPoll} from './monitor';
 import {setup} from './setup';
 import {questions,validate,offer} from './dialog';
 // Cloudflare Worker. Aggregate RSS announcements stay separate from verified lots.
 import { readRzd } from './card';
-import { authorized, feed, identity, rzdTime } from './core.mjs';
+import { authorized, feed, identity, rzdTime, publicCatalogues, serviceMatch } from './core.mjs';
 
 interface Statement {
   bind(...args:unknown[]):Statement;
@@ -13,9 +14,9 @@ interface Statement {
 }
 interface Env {
   DB:{prepare(sql:string):Statement;batch(sql:Statement[]):Promise<unknown>};
-  WEBHOOK_SECRET:string; BOT_TOKEN:string; AGENT_KEY:string;
+  AI?:{run:Function}; WEBHOOK_SECRET:string; BOT_TOKEN:string; AGENT_KEY:string;
 }
-const help='/watch ссылка — разобрать извещение секции РЖД\n/status — источники и Mac\n/check — запросить обход\n/inbox — последние извещения\n/settings — управление агентом';
+const help='/watch ссылка — разобрать извещение секции РЖД\n/status — источники и Mac\n/check — запросить обход\n/inbox — последние извещения\n/settings — управление агентом\n/semantic — смысловая подборка';
 const now=()=>Math.floor(Date.now()/1000);
 const sql=(e:Env,s:string,...p:unknown[])=>e.DB.prepare(s).bind(...p);
 const response=(body:unknown,status=200)=>Response.json(body,{status});
@@ -52,9 +53,7 @@ async function poll(e:Env) {
     const next=rows.length>=10?String((Number(source.cursor)||1)+1):'1';
     const batch=rows.map((r:any)=>sql(e,'INSERT INTO notices(url,title,description,published) VALUES(?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,description=excluded.description,published=excluded.published,updated=unixepoch() WHERE title!=excluded.title OR description!=excluded.description',r.url,r.title,r.description,r.published));
     for(const notice of rows){
-      const subject=(notice.title+' '+notice.description).toLowerCase().replace(/ё/g,'е');
-      const service=/(?:выгруз|разгруз|погруз|перевал|перегруз).{0,60}(?:вагон|груз)|(?:прием|постановк).{0,35}вагон|(?:аренд|предоставлен).{0,55}(?:тупик|пут[иея]).{0,25}(?:железнодорож|необщего пользования)|хранени.{0,30}(?:с ж.д|с железнодорож)/u;
-      if(!service.test(subject))continue;
+      if(!serviceMatch(notice.title+' '+notice.description))continue;
       const message='ЕИС · требуется проверить место исполнения в оригинале\n'+notice.title.slice(0,600)+'\n'+notice.url;
       batch.push(sql(e,"INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner",'eis/'+notice.url,JSON.stringify({text:message})));
     }
@@ -121,8 +120,23 @@ async function telegram(req:Request,e:Env){
         const c=await readRzd(text.slice(7).trim()), lot=await saveCard(e,c);
         const time=rzdTime(c.deadline);
         reply=[c.title,c.customer,'Статус: '+(c.status||'не указано'),'Место: '+(c.place||'не указано'),'НМЦ заказчика: '+(c.price?c.price+' руб.':'не указано'),'Срок: '+(time.utc?time.moscow+' МСК / '+time.khabarovsk+' Хабаровск':c.deadline||'не указано'),'Требуют уточнения: место исполнения и доступность площадки.'].join('\n');
-        markup={inline_keyboard:[[{text:'Оригинал',url:c.url},{text:'Разобрать',callback_data:'/analyze '+lot.id+' '+lot.revision}],...decisionKeys(lot.id,lot.revision).inline_keyboard]};
+        markup={inline_keyboard:[[{text:'Оригинал',url:c.url},{text:'Документы',callback_data:'/documents '+lot.id+' '+lot.revision}],[{text:'Разобрать',callback_data:'/analyze '+lot.id+' '+lot.revision}],...decisionKeys(lot.id,lot.revision).inline_keyboard]};
       }catch{reply='Не удалось прочитать карточку РЖД. Проверьте ссылку или доступность источника.';}
+      break;
+    }
+    case '/documents':{
+      const [,id,revision]=text.split(' ');
+      const row=await sql(e,'SELECT x.payload FROM versions x JOIN lots l ON l.id=x.lot AND l.revision=x.revision WHERE x.lot=? AND x.revision=?',id||'',revision||'').first();
+      if(!row){reply='Откройте актуальную карточку.';break;}
+      const stored=JSON.parse(row.payload);
+      try{
+        const current=await readRzd(stored.url);
+        const docs=current.documents||[];
+        const links=docs.slice(0,30).map((d:any)=>[{text:d.name.slice(0,60),url:d.url}]);
+        links.push([{text:'Все документы в оригинале',url:stored.url}]);
+        reply=docs.length?'Приложения к извещению: '+docs.length:'На странице не найдены ссылки на приложения.';
+        markup={inline_keyboard:links};
+      }catch{reply='Приложения временно недоступны.';markup={inline_keyboard:[[{text:'Оригинал',url:stored.url}]]};}
       break;
     }
     case '/terms':case '/reject':case '/restore':{
@@ -163,13 +177,20 @@ async function telegram(req:Request,e:Env){
       reply='Задача разбора зарегистрирована. Состояние Mac доступно в /status.';break;
     }
     case '/check':
-      await Promise.all([poll(e),b2b(e)]);reply='Проверка обработана с учётом интервала опроса. Результат в /status.';break;
+      await Promise.all([poll(e),b2b(e),publicPoll(e,'roseltorg'),publicPoll(e,'tektorg'),publicPoll(e,'gpb')]);reply='Проверка обработана с учётом интервала опроса. Результат в /status.';break;
     case '/status':{
-      const s=await sql(e,'SELECT * FROM sources WHERE id=?','eis').first();
-      const b=await sql(e,"SELECT * FROM sources WHERE id='b2b'").first();
+      const sources=(await sql(e,'SELECT * FROM sources ORDER BY id').all()).results;
+      const labels:Record<string,string>={eis:'ЕИС',b2b:'B2B-Center',...Object.fromEntries(Object.entries(publicCatalogues).map(([id,c])=>[id,c.name]))};
+      const sourceStatus=sources.map(s=>(labels[s.id]||s.id)+': '+(s.last_error||(s.last_ok?'проверено '+new Date(s.last_ok*1000).toISOString():'проверки ещё не было'))).join('\n');
       const a=await sql(e,'SELECT * FROM agent_state WHERE id=1').first();
       const count=await sql(e,"SELECT count(*) AS n,min(created) AS oldest FROM jobs WHERE state IN ('queued','running')").first();
-      reply='ЕИС: '+(s?.last_error || (s?.last_ok?'выдача прочитана':'проверки ещё не было'))+'\nB2B-Center: '+(b?.last_error||b?.cursor||'проверки ещё не было')+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nВозраст старейшей, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nРасход аккаунта: нет телеметрии.';break;
+      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nВозраст старейшей, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nРасход аккаунта: нет телеметрии.';break;
+    }
+    case '/semantic':{
+      if(!e.AI){reply='Бесплатная модель поиска пока не подключена.';break;}
+      const {results}=await sql(e,'SELECT n.title,n.url,r.scenario FROM semantic_results r JOIN notices n ON n.url=r.url AND n.updated=r.source_updated ORDER BY r.score DESC LIMIT 4').all();
+      reply=results.map(x=>x.title.slice(0,360)+'\nСопоставлено со сценарием: '+x.scenario+'\n'+x.url).join('\n\n') || 'Очередь смысловой проверки ещё не обработана.';
+      break;
     }
     case '/inbox':{
       const {results}=await sql(e,'SELECT title,url FROM notices ORDER BY updated DESC LIMIT 5').all();
@@ -262,5 +283,5 @@ export default {
     if(path.startsWith('/agent/'))return agent(req,e,path);
     return response({},404);
   },
-  async scheduled(_event:unknown,e:Env){await Promise.all([poll(e),b2b(e)]);await deliver(e);}
+  async scheduled(_event:unknown,e:Env){await Promise.all([poll(e),b2b(e),publicPoll(e,'roseltorg'),publicPoll(e,'tektorg'),publicPoll(e,'gpb')]);await deliver(e);await rankNotices(e);}
 };

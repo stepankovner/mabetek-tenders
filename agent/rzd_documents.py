@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 from urllib.request import build_opener, HTTPRedirectHandler
 from .pipeline import extract
+from .model import analyze, select_fragments
 
 MAX_BYTES = 12 * 1024 * 1024
 FILE_URL = re.compile(r'https://223\.rts-tender\.ru/files/FileDownloadHandler\.ashx\?FileGuid=[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}')
@@ -80,6 +81,7 @@ def review(card, cache):
     cache = cache/ident
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
     notes = []
+    fragments = []
     for name, link in attachments[:6]:
         try:
             data = fetch(link, MAX_BYTES)
@@ -99,6 +101,7 @@ def review(card, cache):
                 rows = extract(target)
             for row in rows:
                 row['file'] = name
+            fragments.extend(select_fragments(rows))
             evidence = summarize(rows)
             index = dict(name=name,url=link,sha256=digest,excerpts=evidence)
             with tempfile.NamedTemporaryFile(dir=cache,mode='w',encoding='utf8',delete=False) as f:
@@ -110,4 +113,7 @@ def review(card, cache):
             notes.append(f'{name}: не удалось проверить ({type(exc).__name__})')
     if len(attachments)>6:
         notes.append('Обработаны первые шесть приложений.')
-    return '\n'.join(notes) or 'Конкретное место в обработанных приложениях установить не удалось.'
+    if not notes:
+        notes.append('Конкретное место в обработанных приложениях установить не удалось.')
+    notes.append(analyze(fragments[:48],cache.parent.parent))
+    return '\n'.join(notes)

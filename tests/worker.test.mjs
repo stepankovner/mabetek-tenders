@@ -51,3 +51,16 @@ test('B2B uses the subject and verifies the original procedure number',()=>{
   assert.throws(()=>core.b2bTitle(page,'12'));
   assert.throws(()=>core.b2bTitle('<title>Вход</title>','123'));
 });
+test('B2B associates search titles with the same procedure and distinguishes a valid empty catalogue',()=>{
+ const url='/app/market-next/obshchii-zapros/tender-1234/';
+ const html='<a href="'+url+'#ref">№1234</a><p class="panel-procedure__dscr-main">Услуги <mark>погрузки</mark> вагонов</p>';
+ assert.equal(core.b2bIndex(html)[0].title,'Услуги погрузки вагонов');
+ assert.deepEqual(core.b2bIndex('<main>По вашему запросу \n нет актуальных процедур</main>'),[]);
+});
+test('Original catalogues retain distinct lots and require recognised links',()=>{
+ const card=(lot)=>'<a class="search-results__link--description" href="/procedure/B2011261722344/'+lot+'">Услуги перевалки</a>';
+ assert.equal(core.publicIndex('roseltorg',card(1)+card(2)).length,2);
+ assert.equal(core.publicIndex('tektorg','<a href="/org/rzd/procedures/20204348">Разгрузка грузов</a>')[0].title,'Разгрузка грузов');
+ assert.throws(()=>core.publicIndex('gpb','<a href="https://other.test/front/procedure/view/x" class="vTitle">Запрос поставки</a>'));
+ assert.throws(()=>core.publicIndex('tektorg','<title>Войдите</title>'));
+});

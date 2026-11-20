@@ -13,3 +13,20 @@ class Attachments(unittest.TestCase):
         self.assertIn('Ванино',summarize(rows))
         self.assertIn('абзац 8',summarize(rows))
         self.assertEqual(summarize([]),'')
+
+class Analysis(unittest.TestCase):
+    def test_specific_site_prompts_for_offsite_team(self):
+        from agent.daemon import analysis_message
+        card={'title':'Выгрузка вагонов','place':'См. ТЗ','url':'https://rzd.rts-tender.ru/'}
+        place='ТЗ.doc, строка 117: Место оказания услуг Хабаровский край, г. Хабаровск, 3-й Путевой пер. 8.'
+        text=analysis_message(card,place)
+        self.assertIn('выезд',text.lower())
+        self.assertIn('строка 117',text)
+        self.assertNotIn('допускается ли площадка исполнителя',text.lower())
+
+    def test_missing_document_is_unknown(self):
+        from agent.daemon import analysis_message
+        card={'title':'Погрузка','place':'См. приложение','url':'https://rzd.rts-tender.ru/'}
+        text=analysis_message(card,'Оригинал с приложениями недоступен.')
+        self.assertIn('допускается ли площадка исполнителя',text.lower())
+        self.assertNotIn('точное место установлено',text.lower())
