@@ -61,11 +61,17 @@ def analysis_message(card,evidence):
            "Вопросы семье: "+family,"Вопросы заказчику: "+buyer,"Оригинал: "+card["url"]]
     return "\n".join(parts)
 
+_catalogue_schedule = {}
+
 def tick(conf):
     status=request(conf,"heartbeat",{"free_bytes":shutil.disk_usage(CONFIG.parent).free})
     if status["paused"]:return
     job=request(conf,"claim",{})
-    if not job:return
+    if not job:
+        from .sources import poll_fallback
+        poll_fallback(status.get('failedCatalogues', []), _catalogue_schedule, time.monotonic(),
+                      lambda result: request(conf, 'catalogue', result))
+        return
     card=job["card"]
     if job["op"].startswith("pdf/"):
         with tempfile.TemporaryDirectory() as td:

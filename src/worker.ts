@@ -1,5 +1,5 @@
 import {rankNotices} from './semantic';
-import {b2b,publicPoll} from './monitor';
+import {b2b,publicPoll,macCatalogue} from './monitor';
 import {setup} from './setup';
 import {questions,validate,offer} from './dialog';
 // Cloudflare Worker. Aggregate RSS announcements stay separate from verified lots.
@@ -158,6 +158,18 @@ async function telegram(req:Request,e:Env){
       mutations.push(sql(e,'INSERT OR REPLACE INTO sessions VALUES(?,?,?,?)',user,id,v,field));
       reply=field==='reject'?'Почему лот не подходит?':missing[1];break;
     }
+    case '/transfer':{
+      const [,lot,v]=text.split(' ');
+      const row=await sql(e,'SELECT x.payload FROM lots l JOIN versions x ON x.lot=l.id AND x.revision=l.revision WHERE l.id=? AND l.revision=?',lot||'',v||'').first();
+      if(!row){reply='Карточка обновилась. Откройте текущую версию.';break;}
+      if(await sql(e,'SELECT 1 FROM decisions WHERE owner=? AND lot=? AND revision=?',user,lot,v).first()){reply='Подготовка лота остановлена.';break;}
+      try{
+        const card=JSON.parse(row.payload);
+        const info=offer(card,await fields(Number(lot),Number(v)));
+        reply=['Значения для переноса в форму заказчика',info.summary,'Сведения о персонале, согласия и подпись заполняются отдельно.','Оригинал: '+card.url].join('\n');
+      }catch(err){reply=(err as Error).message;}
+      break;
+    }
     case '/confirm':{
       const [,id,v,signature]=text.split(' ');
       const row=await sql(e,'SELECT x.payload FROM lots l JOIN versions x ON x.lot=l.id AND x.revision=l.revision WHERE l.id=? AND l.revision=?',id||'',v||'').first();
@@ -197,7 +209,7 @@ async function telegram(req:Request,e:Env){
     case '/status':{
       const sources=(await sql(e,'SELECT * FROM sources ORDER BY id').all()).results;
       const labels:Record<string,string>={eis:'ЕИС',b2b:'B2B-Center',...Object.fromEntries(Object.entries(publicCatalogues).map(([id,c])=>[id,c.name]))};
-      const sourceStatus=sources.map(s=>(labels[s.id]||s.id)+': '+(s.last_error||(s.last_ok?'проверено '+new Date(s.last_ok*1000).toISOString():'проверки ещё не было'))).join('\n');
+      const sourceStatus=sources.map(s=>(s.id.startsWith('mac/')?'Mac · '+(labels[s.id.slice(4)]||s.id.slice(4)):(labels[s.id]||s.id))+': '+(s.last_error||(s.last_ok?'проверено '+new Date(s.last_ok*1000).toISOString():'проверки ещё не было'))).join('\n');
       const a=await sql(e,'SELECT * FROM agent_state WHERE id=1').first();
       const count=await sql(e,"SELECT count(*) AS n,min(created) AS oldest FROM jobs WHERE state IN ('queued','running')").first();
       reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nВозраст старейшей, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nРасход аккаунта: нет телеметрии.';break;
@@ -233,7 +245,7 @@ async function telegram(req:Request,e:Env){
         try{details=offer(JSON.parse(session.payload),values);}catch(err){reply=(err as Error).message;break;}
         mutations.push(saveAnswer);
         const signature=(await hash(JSON.stringify(details.data))).slice(0,16);
-        reply=details.summary;markup={inline_keyboard:[[{text:'Сформировать КП',callback_data:'/confirm '+lot+' '+revision+' '+signature},{text:'Исправить',callback_data:'/edit '+lot+' '+revision}]]};
+        reply=details.summary;markup={inline_keyboard:[[{text:'Сформировать КП',callback_data:'/confirm '+lot+' '+revision+' '+signature},{text:'Исправить',callback_data:'/edit '+lot+' '+revision}],[{text:'Данные для формы заказчика',callback_data:'/transfer '+lot+' '+revision}]]};
         mutations.push(sql(e,'DELETE FROM sessions WHERE owner=?',user));
       }
       break;
@@ -279,9 +291,16 @@ async function agent(req:Request,e:Env,path:string) {
     await e.DB.batch([sql(e,"UPDATE jobs SET state='done' WHERE id=?",id),sql(e,"INSERT INTO offers(lot,revision,digest,state) VALUES(?,?,?,'отправлено владельцу')",job.lot,job.revision,job.op.slice(4))]);return response({});
   }
   const body=await req.json() as any;
+  if(path==='/agent/catalogue'){
+    if(!Object.hasOwn(publicCatalogues,body.source)||typeof body.html!=='string'||body.html.length>3000000)return response({},400);
+    const error=body.error==='unavailable'?'Площадка недоступна с Mac':'';
+    return response(await macCatalogue(e,body.source as keyof typeof publicCatalogues,body.html,error));
+  }
   if(path==='/agent/heartbeat'){
     await sql(e,'UPDATE agent_state SET seen=unixepoch(),free_bytes=? WHERE id=1',Number(body.free_bytes)||0).run();
-    return response(await sql(e,'SELECT paused FROM agent_state WHERE id=1').first());
+    const state=await sql(e,'SELECT paused FROM agent_state WHERE id=1').first();
+    const failed=await sql(e,"SELECT id FROM sources WHERE id IN ('roseltorg','tektorg','gpb') AND last_error IS NOT NULL").all();
+    return response({...state,failedCatalogues:failed.results.map(r=>r.id)});
   }
   if(path==='/agent/claim'){
     const job=await sql(e,"UPDATE jobs SET state='running',lease=?,until_ts=unixepoch()+300,attempts=attempts+1 WHERE id=(SELECT j.id FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE (j.state='queued' OR (j.state='running' AND j.until_ts<unixepoch())) AND j.attempts<4 AND (SELECT paused FROM agent_state WHERE id=1)=0 ORDER BY j.created LIMIT 1) RETURNING *",crypto.randomUUID()).first();

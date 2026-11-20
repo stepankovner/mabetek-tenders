@@ -40,3 +40,30 @@ def probe(pair):
 if __name__=="__main__":
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         print(json.dumps(list(pool.map(probe,SOURCES.items())),ensure_ascii=False,indent=2))
+
+CATALOGUES = {
+    'roseltorg': 'https://www.roseltorg.ru/procedures/search',
+    'tektorg': 'https://www.tektorg.ru/procedures',
+    'gpb': 'https://etpgpb.ru/procedures/',
+}
+
+def fetch_catalogue(source):
+    req = urllib.request.Request(CATALOGUES[source], headers={'User-Agent':'Mabetek-Tenders/1.0', 'Accept':'text/html'})
+    with urllib.request.build_opener(NoRedirect()).open(req, timeout=12) as response:
+        data = response.read(3000001)
+        if len(data) > 3000000 or response.headers.get_content_type() != 'text/html':
+            raise ValueError('Не удалось прочитать каталог')
+        return data.decode(response.headers.get_content_charset() or 'utf-8', 'replace')
+
+def poll_fallback(failed, schedule, now, publish):
+    due = [name for name in CATALOGUES if name in failed and schedule.get(name, 0) <= now]
+    if not due:
+        return
+    source = min(due, key=lambda key: schedule.get(key, 0))
+    schedule[source] = now + 900
+    try:
+        html = fetch_catalogue(source)
+    except (OSError, ValueError, LookupError):
+        publish(dict(source=source, html='', error='unavailable'))
+        return
+    publish(dict(source=source, html=html))

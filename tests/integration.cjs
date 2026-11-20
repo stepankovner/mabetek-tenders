@@ -35,7 +35,7 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
  global.fetch=async(url,opts)=>{
    if(String(url)===card){
      const fields={'Наименование':'Погрузка и выгрузка грузов','Заказчик':'Учебный заказчик','Место поставки':location,'Регион':'Хабаровский край','Площадка':'РТС-тендер','Статус на площадке':'Прием заявок','Дата окончания подачи заявок':'24.11.2099 02:00 МСК'};
-     return new Response('<table>'+Object.entries(fields).map(([k,v])=>'<tr><td>'+k+'</td><td>'+v+'</td></tr>').join('')+'</table>');
+     return new Response('<a href="/Tenders/Apply?tenderId=24233643&amp;registrationNumber=32616584495">Подать</a><table>'+Object.entries(fields).map(([k,v])=>'<tr><td>'+k+'</td><td>'+v+'</td></tr>').join('')+'</table>');
    }
    if(String(url).endsWith('/sendMessage')){sent.push(JSON.parse(opts.body));return Response.json({ok:true,result:{message_id:sent.length}});}
    if(String(url).endsWith('/sendDocument')){docs.push(opts.body);return Response.json({ok:true,result:{message_id:128}});}
@@ -65,7 +65,10 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    await talk('/analyze 1 1');assert.match(sent.at(-1).text,/готов/i);
    await talk('/terms 1 1');
    for(const input of ['Выгрузка','1.5','т','3.33','без НДС','1 декабря','после акта','25 ноября','1'])await talk(input);
-   const approval=sent.at(-1);assert.match(approval.text,/5.00 ₽/);
+   const approval=sent.at(-1);assert.match(approval.text,/5.00 ₽/);assert.match(approval.text,/32616584495\/1/);
+   await talk(approval.reply_markup.inline_keyboard[1][0].callback_data);
+   assert.match(sent.at(-1).text,/Значения для переноса/);
+   assert.match(sent.at(-1).text,/без НДС/);
    await talk(approval.reply_markup.inline_keyboard[0][0].callback_data);
    const pdfJob=await agent('claim',{});assert.match(pdfJob.op,/^pdf\//);
    const pdf=Buffer.from('%PDF-1.7\nfixture');
@@ -191,4 +194,18 @@ test('Offer uses the verified Roseltorg lot and requires a named customer',()=>{
  answers.verified='2';
  assert.equal(offer(card,answers).data.lot,'1234/2');
  assert.throws(()=>offer({...card,customer:''},answers),/не указан заказчик/);
+});
+test('Mac catalogue independently reports errors and shares cloud notice deduplication',async()=>{
+ const {db,env}=fixture();
+ const {macCatalogue}=require(path.join(tmp,'monitor.js'));
+ const html='<a href="/procedure/B12345678/2" class="search-results__link--description">Услуги по выгрузке вагонов</a>';
+ try{
+  db.exec("INSERT INTO owner(id) VALUES('1')");
+  await macCatalogue(env,'roseltorg',html,'');
+  await macCatalogue(env,'roseltorg',html,'');
+  await macCatalogue(env,'roseltorg','blocked','');
+  assert.equal(db.prepare('SELECT COUNT(*) n FROM outbox').get().n,1);
+  const status=db.prepare("SELECT * FROM sources WHERE id='mac/roseltorg'").get();
+  assert.ok(status.last_ok);assert.match(status.last_error,/Не распознана/);
+ }finally{db.close();}
 });

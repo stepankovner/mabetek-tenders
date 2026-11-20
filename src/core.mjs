@@ -23,7 +23,7 @@ export function feed(xml) {
 export function rzdCard(html,url) {
   const u = new URL(url);
   if(u.origin!=='https://rzd.rts-tender.ru' || u.pathname!=='/TenderInterests/LogViewAndRedirect' || !/^\d+$/.test(u.searchParams.get('tenderId')||'')) throw Error('Требуется карточка секции РЖД');
-  const lines=html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi,'').replace(/<\/(?:td|th|div|h[1-6]|span|li|p)>/gi,'\n').replace(/<[^>]*>/g,'').replace(/&nbsp;|&#160;/g,' ').replace(/&quot;/g,'"').replace(/&amp;/g,'&').split(/\n/).map(s=>s.trim()).filter(Boolean);
+  const lines=html.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi,'').replace(/<\/(?:td|th|div|h[1-6]|span|li|p|a)>/gi,'\n').replace(/<[^>]*>/g,'').replace(/&nbsp;|&#160;/g,' ').replace(/&quot;/g,'"').replace(/&amp;/g,'&').split(/\n/).map(s=>s.trim()).filter(Boolean);
   function get(key){const i=lines.findIndex(s=>s.replace(/:$/,'')===key);return i<0?'':lines[i+1]||'';}
   const title=get('Наименование'),customer=get('Заказчик');
   if(!title||!customer||!get('Площадка')) throw Error('Не распознана карточка РЖД');
@@ -33,7 +33,15 @@ export function rzdCard(html,url) {
     const name=tr.replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
     if(link && /\.(?:docx?|xlsx?|pdf|zip)$/i.test(name) && !documents.some(d=>d.url===link))documents.push({name,url:link});
   }
-  return {...(documents.length?{documents}:{}),source:'rzd-rts',procedure:u.searchParams.get('tenderId'),lot:'процедура',title,customer,place:get('Место поставки'),region:get('Регион'),price:get('НМЦ'),deadline:get('Дата окончания подачи заявок'),status:get('Статус на площадке'),url:u.href};
+  const registrations=new Set();
+  for(const [,href] of html.matchAll(/<a\b[^>]*\bhref=["']([^"']+)["']/gi)){
+    let apply;
+    try{apply=new URL(href.replace(/&amp;/g,'&'),u);}catch{continue;}
+    const number=apply.searchParams.get('registrationNumber')||'';
+    if(apply.origin===u.origin && apply.pathname==='/Tenders/Apply' && apply.searchParams.get('tenderId')===u.searchParams.get('tenderId') && /^\d{11}$/.test(number))registrations.add(number);
+  }
+  const registration=registrations.size===1?[...registrations][0]:null;
+  return {...(registration?{registration}:{}),...(documents.length?{documents}:{}),source:'rzd-rts',procedure:u.searchParams.get('tenderId'),lot:'процедура',title,customer,place:get('Место поставки'),region:get('Регион'),price:get('НМЦ'),deadline:get('Дата окончания подачи заявок'),status:get('Статус на площадке'),url:u.href};
 }
 
 // The RZD procurement section publishes its clocks in Moscow time (UTC+3).
@@ -58,7 +66,7 @@ export function b2bIndex(html) {
     if(url.origin!=='https://www.b2b-center.ru' || !/^\/(?:app\/market-next|market)\//.test(url.pathname))continue;
     const block=html.slice(a.index+a[0].length,anchors[i+1]?.index??html.length);
     const raw=block.match(/<p\b[^>]*class=["'][^"']*\bpanel-procedure__dscr-main\b[^"']*["'][^>]*>([\s\S]*?)<\/p>/i)?.[1];
-    const title=raw?.replace(/<[^>]+>/g,'').replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
+    const title=raw?.replace(/<[^>]+>/g,'').replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&laquo;/g,'«').replace(/&raquo;/g,'»').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
     const item=unique.get(a[2])||{id:a[2],url:url.origin+url.pathname};
     if(title)item.title=title;
     unique.set(a[2],item);
@@ -72,7 +80,7 @@ export function b2bTitle(html,id) {
   if (!element || !/^\d+$/.test(id)) throw Error('Нет заголовка оригинала');
   const parts = element[1].split(/\s+[—–]\s+(?:Тендер|Закупка|Лот)\s*№\s*/i);
   if (parts.length !== 2 || parts[1].match(/^\d+/)?.[0] !== id) throw Error('Нет заголовка оригинала');
-  const title = parts[0].replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
+  const title = parts[0].replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&laquo;/g,'«').replace(/&raquo;/g,'»').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
   if (!title) throw Error('Нет заголовка оригинала');
   return title;
 }
@@ -95,7 +103,7 @@ export function publicIndex(source,html) {
     if(source==='roseltorg' && !(url.hostname==='www.roseltorg.ru' && /^\/procedure\/[\w-]+(?:\/\d+)?\/?$/.test(url.pathname) && attrs.includes('search-results__link--description')))continue;
     if(source==='tektorg' && !(url.hostname==='www.tektorg.ru' && /^\/(?:org\/[\w-]+\/)?procedures\/\d+\/?$/.test(url.pathname)))continue;
     if(source==='gpb' && !(/^([a-z0-9-]+\.)?etpgpb\.ru$/.test(url.hostname) && /^\/front\/procedure\/view\/[\da-f-]+\/?$/i.test(url.pathname) && attrs.includes('vTitle')))continue;
-    const title=body.replace(/<!--[\s\S]*?-->|<[^>]+>/g,'').replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
+    const title=body.replace(/<!--[\s\S]*?-->|<[^>]+>/g,'').replace(/&quot;/g,'"').replace(/&amp;/g,'&').replace(/&laquo;/g,'«').replace(/&raquo;/g,'»').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
     if(title.length<5 || /^№\s*[\w-]+$/.test(title))continue;
     const canonical=url.origin+url.pathname;
     found.set(canonical,{url:canonical,title});

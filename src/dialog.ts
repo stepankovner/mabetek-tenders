@@ -27,7 +27,8 @@ export function offer(card:any,answers:Record<string,string>){
   const decimal=(s:string,n:number)=>{const [a,b='']=s.split('.');return BigInt(a+b.padEnd(n,'0'));};
   const cents=(decimal(qty,3)*decimal(rate,2)+500n)/1000n;
   const total=String(cents/100n)+'.'+String(cents%100n).padStart(2,'0');
-  const data={customer:card.customer,lot:card.procedure+'/'+verified,items:[{service,qty,unit,rate}],vat,dates,terms,validity,currency:'RUB',confirmed:true};
+  if(card.source==='rzd-rts' && !card.registration)throw Error('Для КП требуется номер извещения ЕИС. Заново откройте оригинал через /watch и проверьте номер.');
+  const data={customer:card.customer,lot:(card.registration||card.procedure)+'/'+verified,items:[{service,qty,unit,rate}],vat,dates,terms,validity,currency:'RUB',confirmed:true};
   const summary=[card.customer,'Лот '+data.lot,service,qty+' '+unit+' × '+rate+' ₽ = '+total+' ₽',vat,dates,terms,'Действует: '+validity].join('\n');
   return {data,summary};
 }

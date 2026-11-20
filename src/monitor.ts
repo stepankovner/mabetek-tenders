@@ -11,7 +11,16 @@ class RateLimit extends Error {
   }
 }
 async function page(url:string){
-  const r=await fetch(url,{redirect:'manual',signal:AbortSignal.timeout(12000)});
+  const signal=AbortSignal.timeout(12000);
+  let r=await fetch(url,{redirect:'manual',signal});
+  if([301,302,307,308].includes(r.status) && r.headers.get('Location')){
+    const original=new URL(url);
+    const target=new URL(r.headers.get('Location')!,original);
+    if(target.origin===original.origin && !target.username && !target.password && target.pathname.replace(/\/$/,'')===original.pathname.replace(/\/$/,'') && target.href!==original.href){
+      await r.body?.cancel();
+      r=await fetch(target.href,{redirect:'manual',signal});
+    }
+  }
   if(r.status===429)throw new RateLimit(r.headers.get('Retry-After'));
   if(!r.ok)throw Error('HTTP '+r.status);
   const reader=r.body!.getReader(),decoder=new TextDecoder();
@@ -49,15 +58,9 @@ export async function b2b(e:any){
   }
 }
 
-export async function publicPoll(e:any,source:keyof typeof publicCatalogues){
+function noticeStatements(e:any,source:keyof typeof publicCatalogues,rows:{title:string,url:string}[]){
   const catalogue=publicCatalogues[source];
   const q=(s:string,...params:unknown[])=>e.DB.prepare(s).bind(...params);
-  await q('INSERT OR IGNORE INTO sources(id,url) VALUES(?,?)',source,catalogue.url).run();
-  const due=await q('UPDATE sources SET next_at=unixepoch()+900 WHERE id=? AND next_at<=unixepoch() RETURNING cursor',source).first();
-  if(!due)return;
-  try{
-    const result=source==='roseltorg'?await readRoseltorg(due.cursor):null;
-    const rows=result?result.rows:publicIndex(source,await page(catalogue.url));
     const statements=[];
     for(const row of rows){
       statements.push(q('INSERT INTO notices(url,title,description) VALUES(?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,updated=max(unixepoch(),updated+1) WHERE title!=excluded.title',row.url,row.title,catalogue.name));
@@ -67,6 +70,33 @@ export async function publicPoll(e:any,source:keyof typeof publicCatalogues){
       const payload=lot&&lot.length<=55?{text:message,reply_markup:{inline_keyboard:[[{text:'Открыть карточку',callback_data:'/ros '+lot}]]}}:{text:message};
       statements.push(q('INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner',row.url,JSON.stringify(payload)));
     }
+  return statements;
+}
+
+export async function macCatalogue(e:any,source:keyof typeof publicCatalogues,html:string,error:string){
+  const catalogue=publicCatalogues[source];
+  const id='mac/'+source;
+  let rows:{title:string,url:string}[]=[];
+  if(!error){
+    try{rows=publicIndex(source,html);}
+    catch{error='Не распознана публичная выдача на Mac';}
+  }
+  const statements=noticeStatements(e,source,rows);
+  statements.push(e.DB.prepare('INSERT INTO sources(id,url,last_ok,last_error) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_ok=coalesce(excluded.last_ok,sources.last_ok),last_error=excluded.last_error').bind(id,catalogue.url,error?null:Math.floor(Date.now()/1000),error||null));
+  await e.DB.batch(statements);
+  return {count:rows.length,error:error||null};
+}
+
+export async function publicPoll(e:any,source:keyof typeof publicCatalogues){
+  const catalogue=publicCatalogues[source];
+  const q=(s:string,...params:unknown[])=>e.DB.prepare(s).bind(...params);
+  await q('INSERT OR IGNORE INTO sources(id,url) VALUES(?,?)',source,catalogue.url).run();
+  const due=await q('UPDATE sources SET next_at=unixepoch()+900 WHERE id=? AND next_at<=unixepoch() RETURNING cursor',source).first();
+  if(!due)return;
+  try{
+    const result=source==='roseltorg'?await readRoseltorg(due.cursor):null;
+    const rows=result?result.rows:publicIndex(source,await page(catalogue.url));
+    const statements=noticeStatements(e,source,rows);
     statements.push(q('UPDATE sources SET last_ok=unixepoch(),last_error=NULL,cursor=? WHERE id=?',result?result.cursor:'Первая страница: '+rows.length,source));
     await e.DB.batch(statements);
   }catch(err){
