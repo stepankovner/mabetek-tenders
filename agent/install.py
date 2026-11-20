@@ -6,12 +6,52 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
 import tempfile
 import urllib.error
 import ssl
 from pathlib import Path
 
-from .daemon import LABEL, request, settings
+from .daemon import LABEL, request, settings, tick
+
+class RegistrationError(RuntimeError):
+    pass
+
+
+def register_agent(domain, plist, data):
+    target=domain+"/"+LABEL
+    def loaded():
+        return subprocess.run(["launchctl","print",target],capture_output=True,text=True)
+    def running_expected():
+        state=loaded()
+        return state.returncode==0 and ("working directory = "+data["WorkingDirectory"]+"\n") in state.stdout
+    previous=plist.read_bytes() if plist.exists() else None
+    desired=plistlib.dumps(data)
+    if previous==desired and running_expected():
+        return
+    if loaded().returncode==0:
+        subprocess.run(["launchctl","bootout",target],check=True)
+        for _ in range(30):
+            if loaded().returncode!=0:break
+            time.sleep(0.2)
+        else:
+            raise SystemExit("launchd пока завершает старую службу. Конфигурация сохранена.")
+    def replace(payload):
+        with tempfile.NamedTemporaryFile(dir=plist.parent,delete=False) as tmp:
+            tmp.write(payload)
+        Path(tmp.name).replace(plist)
+    if desired!=previous:
+        replace(desired)
+    for delay in (0.5,1,2,4,8):
+        time.sleep(delay)
+        run=subprocess.run(["launchctl","bootstrap",domain,str(plist)],capture_output=True,text=True)
+        if running_expected():return
+        if run.returncode not in (0,5):break
+    if previous and previous!=desired:
+        if loaded().returncode!=0:
+            replace(previous)
+            subprocess.run(["launchctl","bootstrap",domain,str(plist)],capture_output=True)
+    raise RegistrationError("launchd не подтвердил регистрацию пользовательской службы. Код bootstrap: "+str(run.returncode)+". Проверьте разрешение фоновой работы для Python в настройках macOS.")
 
 def main():
     os.umask(0o077)
@@ -57,7 +97,7 @@ def main():
         else:
             reason = type(exc).__name__
         (base/"install-status.txt").write_text(reason+"\n")
-        if not isinstance(exc, urllib.error.URLError):
+        if isinstance(exc, urllib.error.HTTPError) or not isinstance(exc, urllib.error.URLError):
             raise SystemExit("Первичная проверка: "+reason) from None
         print(reason+" Агент повторит подключение после запуска.",flush=True)
     else:
@@ -71,11 +111,18 @@ def main():
         old=plistlib.loads(plist.read_bytes())
         if old.get("Label")!=LABEL or not str(old.get("WorkingDirectory","")).startswith(str(releases)+"/"):
             raise SystemExit("Обнаружена другая конфигурация с таким именем.")
+    try:
+        register_agent(domain,plist,data)
+    except RegistrationError as exc:
+        print(str(exc),flush=True)
         if subprocess.run(["launchctl","print",domain+"/"+LABEL],capture_output=True).returncode==0:
-            subprocess.run(["launchctl","bootout",domain+"/"+LABEL],check=True)
-    staging=plist.with_suffix(".new");staging.write_bytes(plistlib.dumps(data));staging.replace(plist)
-    subprocess.run(["launchctl","bootstrap",domain,str(plist)],check=True)
-    subprocess.run(["launchctl","print",domain+"/"+LABEL],check=True,stdout=subprocess.DEVNULL)
+            raise SystemExit("Обнаружена зарегистрированная служба. Проверьте её рабочую версию.") from None
+        print("Выполняю один цикл уже установленного агента в текущем окне.",flush=True)
+        try:
+            tick(settings())
+        except (OSError,ValueError,KeyError) as err:
+            print("Цикл не завершён:",type(err).__name__,flush=True)
+        raise SystemExit("Автозапуск не подтверждён. Файл службы сохранён для следующего входа в macOS.") from None
     print("Автозапуск зарегистрирован. Статус соединения доступен в Telegram по /status.")
 
 if __name__=="__main__":main()
