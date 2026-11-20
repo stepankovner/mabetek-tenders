@@ -51,6 +51,13 @@ async function poll(e:Env) {
     const rows=feed(xml+decoder.decode());
     const next=rows.length>=10?String((Number(source.cursor)||1)+1):'1';
     const batch=rows.map((r:any)=>sql(e,'INSERT INTO notices(url,title,description,published) VALUES(?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,description=excluded.description,published=excluded.published,updated=unixepoch() WHERE title!=excluded.title OR description!=excluded.description',r.url,r.title,r.description,r.published));
+    for(const notice of rows){
+      const subject=(notice.title+' '+notice.description).toLowerCase().replace(/ё/g,'е');
+      const service=/(?:выгруз|разгруз|погруз|перевал|перегруз).{0,60}(?:вагон|груз)|(?:прием|постановк).{0,35}вагон|(?:аренд|предоставлен).{0,55}(?:тупик|пут[иея]).{0,25}(?:железнодорож|необщего пользования)|хранени.{0,30}(?:с ж.д|с железнодорож)/u;
+      if(!service.test(subject))continue;
+      const message='ЕИС · требуется проверить место исполнения в оригинале\n'+notice.title.slice(0,600)+'\n'+notice.url;
+      batch.push(sql(e,"INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner",'eis/'+notice.url,JSON.stringify({text:message})));
+    }
     batch.push(sql(e,"UPDATE sources SET last_ok=unixepoch(),cursor=?,last_error=NULL WHERE id='eis'",next));
     await e.DB.batch(batch);
   } catch(err) {

@@ -105,3 +105,20 @@ test('B2B stores one notice from a tracked catalogue URL and honors Retry-After'
     assert.equal(db.prepare("SELECT last_error FROM sources WHERE id='b2b'").get().last_error,null);
   }finally{global.fetch=previous;db.close();}
 });
+test('Scheduled EIS poll sends a matching notice once and skips unrelated supplies',async()=>{
+ const {db,env}=fixture();
+ db.exec("INSERT INTO owner(id) VALUES('1')");
+ const previous=global.fetch, sent=[];
+ const items=['Услуги по выгрузке вагонов в Хабаровске','Поставка железнодорожных колёс в Хабаровск'];
+ global.fetch=async(url,opts)=>{
+   if(String(url).startsWith('https://zakupki.gov.ru/')) return new Response('<rss><channel>'+items.map((title,i)=>'<item><link>https://zakupki.gov.ru/'+i+'</link><title>'+title+'</title></item>').join('')+'</channel></rss>');
+   if(String(url).endsWith('/sendMessage')){sent.push(JSON.parse(opts.body).text);return Response.json({ok:true,result:{message_id:55}});}
+   return new Response('',{status:503});
+ };
+ try{
+   for(let i=0;i<2;i++){db.exec("UPDATE sources SET next_at=0");await worker.scheduled({},env);}
+   assert.equal(sent.length,1);
+   assert.match(sent[0],/выгрузке вагонов/);
+   assert.equal(db.prepare('SELECT count(*) n FROM notices').get().n,2);
+ }finally{global.fetch=previous;db.close();}
+});
