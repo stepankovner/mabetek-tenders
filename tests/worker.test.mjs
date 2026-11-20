@@ -24,3 +24,17 @@ test('Карточка секции РЖД сохраняет место из Т
   assert.match(core.rzdCard(html,url).place,/техническом/);
   assert.throws(()=>core.rzdCard('<html>Вход</html>',url));
 });
+test('РЖД: зона каталога, лишние пробелы и обе местные даты',()=>{
+ const t=core.rzdTime('24.11.2026  02:00');
+ assert.equal(t.utc,'2026-11-23T23:00:00.000Z');
+ assert.equal(t.khabarovsk,'24.11.2026 09:00');
+ assert.equal(core.rzdTime('24.11.2026').utc,null);
+ assert.equal(core.rzdTime('31.02.2026 12:00').utc,null);
+});
+test('B2B-Center: извещения, повторы ссылок, контроль оригинала и капчи',()=>{
+ const u='/app/market-next/postanovka-vagonov/tender-1234567/';
+ const html='<h1>Поиск</h1><a href="'+u+'">№ 1234567</a><a href="'+u+'">№ 1234567</a>';
+ assert.deepEqual(core.b2bIndex(html),[{id:'1234567',url:'https://www.b2b-center.ru'+u}]);
+ assert.throws(()=>core.b2bIndex('<title>Captcha</title>'));
+ assert.throws(()=>core.b2bIndex('<a href="https://foreign.invalid'+u+'">Торги</a>'));
+});
