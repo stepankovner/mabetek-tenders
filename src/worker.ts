@@ -4,7 +4,7 @@ import {setup} from './setup';
 import {questions,validate,offer} from './dialog';
 // Cloudflare Worker. Aggregate RSS announcements stay separate from verified lots.
 import { readCard } from './card';
-import { authorized, feed, identity, rzdTime, publicCatalogues, serviceMatch } from './core.mjs';
+import { authorized, feed, identity, rzdTime, publicCatalogues, roseltorgCard, serviceMatch } from './core.mjs';
 
 interface Statement {
   bind(...args:unknown[]):Statement;
@@ -121,6 +121,13 @@ async function saveCard(e:Env,c:any){
   ]);
   return (await sql(e,'SELECT id,revision FROM lots WHERE canonical=?',key).first())!;
 }
+const decisionKeys=(id:number,v:number)=>({inline_keyboard:[[{text:'Уточнить условия',callback_data:'/terms '+id+' '+v},{text:'Не подходит',callback_data:'/reject '+id+' '+v}]]});
+function cardMessage(c:any,lot:any){
+const time=rzdTime(c.deadline);
+        const text=[c.title,c.customer||'Заказчик не указан','Статус: '+(c.status||'не указано'),'Место: '+(c.place||'не указано'),(c.source==='roseltorg'?'Цена лота в карточке: ':'НМЦ заказчика: ')+(c.price?c.price+' руб.':'не указано'),'Срок: '+(time.utc?time.moscow+' МСК / '+time.khabarovsk+' Хабаровск':c.deadline||'не указано'),'Требуют уточнения: место исполнения и доступность площадки.'].join('\n');
+        const reply_markup={inline_keyboard:[[{text:'Оригинал',url:c.url},{text:'Документы',callback_data:'/documents '+lot.id+' '+lot.revision}],[{text:'Разобрать',callback_data:'/analyze '+lot.id+' '+lot.revision}],...decisionKeys(lot.id,lot.revision).inline_keyboard]};
+  return {text,reply_markup};
+}
 async function telegram(req:Request,e:Env){
   if(!await same(req.headers.get('X-Telegram-Bot-Api-Secret-Token'),e.WEBHOOK_SECRET))return response({},403);
   const u=await req.json() as any, cb=u.callback_query;
@@ -142,18 +149,22 @@ async function telegram(req:Request,e:Env){
   let markup:unknown=undefined;
   const mutations:Statement[]=[];
   const session=await sql(e,'SELECT s.*,v.payload,l.revision AS current FROM sessions s JOIN lots l ON l.id=s.lot JOIN versions v ON v.lot=s.lot AND v.revision=s.revision WHERE s.owner=?',user).first();
-  const decisionKeys=(id:number,v:number)=>({inline_keyboard:[[{text:'Уточнить условия',callback_data:'/terms '+id+' '+v},{text:'Не подходит',callback_data:'/reject '+id+' '+v}]]});
+
   const fields=async(id:number,v:number)=>Object.fromEntries((await sql(e,'SELECT field,value FROM answers WHERE owner=? AND lot=? AND revision=?',user,id,v).all()).results.map(r=>[r.field,r.value]));
 
   switch(text.split(' ')[0]){
     case '/ros':case '/watch':{
+      const input=text.startsWith('/ros ')?'https://www.roseltorg.ru/procedure/'+text.slice(5).trim():text.slice(7).trim();
       try{
-        const input=text.startsWith('/ros ')?'https://www.roseltorg.ru/procedure/'+text.slice(5).trim():text.slice(7).trim();
         const c=await readCard(input), lot=await saveCard(e,c);
-        const time=rzdTime(c.deadline);
-        reply=[c.title,c.customer||'Заказчик не указан','Статус: '+(c.status||'не указано'),'Место: '+(c.place||'не указано'),(c.source==='roseltorg'?'Цена лота в карточке: ':'НМЦ заказчика: ')+(c.price?c.price+' руб.':'не указано'),'Срок: '+(time.utc?time.moscow+' МСК / '+time.khabarovsk+' Хабаровск':c.deadline||'не указано'),'Требуют уточнения: место исполнения и доступность площадки.'].join('\n');
-        markup={inline_keyboard:[[{text:'Оригинал',url:c.url},{text:'Документы',callback_data:'/documents '+lot.id+' '+lot.revision}],[{text:'Разобрать',callback_data:'/analyze '+lot.id+' '+lot.revision}],...decisionKeys(lot.id,lot.revision).inline_keyboard]};
-      }catch{reply='Не удалось прочитать оригинал закупки. Проверьте ссылку или доступность источника.';}
+        const message=cardMessage(c,lot);
+        reply=message.text;markup=message.reply_markup;
+      }catch{
+        if(/^https:\/\/www\.roseltorg\.ru\/procedure\/[A-Za-z0-9_-]+\/\d+\/?$/.test(input)){
+          mutations.push(sql(e,'INSERT INTO pending_cards(url,owner,request_id) VALUES(?,?,?) ON CONFLICT(url) DO NOTHING',input.replace(/\/$/,''),user,u.update_id));
+          reply='Cloudflare не смог открыть лот. Проверка передана на Mac. Результат придёт в этот чат.';
+        }else reply='Не удалось прочитать оригинал закупки. Проверьте ссылку или доступность источника.';
+      }
       break;
     }
     case '/documents':{
@@ -328,6 +339,22 @@ async function agent(req:Request,e:Env,path:string) {
     await e.DB.batch([sql(e,"UPDATE jobs SET state='done' WHERE id=?",id),sql(e,"INSERT INTO offers(lot,revision,digest,state) VALUES(?,?,?,'отправлено владельцу')",job.lot,job.revision,job.op.slice(4))]);return response({});
   }
   const body=await req.json() as any;
+  if(path==='/agent/card-claim'){
+    const task=await sql(e,"UPDATE pending_cards SET lease=?,available=unixepoch()+120 WHERE url=(SELECT url FROM pending_cards WHERE available<=unixepoch() AND (SELECT paused FROM agent_state WHERE id=1)=0 ORDER BY request_id LIMIT 1) RETURNING url,lease",crypto.randomUUID()).first();
+    return response(task);
+  }
+  if(path==='/agent/card-result'){
+    const task=await sql(e,'SELECT * FROM pending_cards WHERE url=? AND lease=? AND available>=unixepoch()',body.url,body.lease).first();
+    if(!task)return response({},409);
+    if(typeof body.html!=='string'||body.html.length>3000000)return response({},400);
+    let message:any={text:'Mac также не смог прочитать лот. Оригинал: '+task.url};
+    let card;
+    try{card=roseltorgCard(body.html,task.url);}catch{}
+    if(card)message=cardMessage(card,await saveCard(e,card));
+    await e.DB.batch([sql(e,'INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,owner,? FROM pending_cards WHERE url=? AND lease=?','card/'+task.request_id,JSON.stringify(message),task.url,task.lease),sql(e,'DELETE FROM pending_cards WHERE url=? AND lease=?',task.url,task.lease)]);
+    await deliver(e);
+    return response({});
+  }
   if(path==='/agent/catalogue'){
     if(!Object.hasOwn(publicCatalogues,body.source)||typeof body.html!=='string'||body.html.length>3000000)return response({},400);
     const error=body.error==='unavailable'?'Площадка недоступна с Mac':'';
@@ -337,7 +364,8 @@ async function agent(req:Request,e:Env,path:string) {
     await sql(e,'UPDATE agent_state SET seen=unixepoch(),free_bytes=? WHERE id=1',Number(body.free_bytes)||0).run();
     const state=await sql(e,'SELECT paused FROM agent_state WHERE id=1').first();
     const failed=await sql(e,"SELECT id FROM sources WHERE id IN ('roseltorg','tektorg','gpb') AND last_error IS NOT NULL").all();
-    return response({...state,failedCatalogues:failed.results.map(r=>r.id)});
+    const pending=await sql(e,"SELECT 1 FROM pending_cards WHERE available<=unixepoch() LIMIT 1").first();
+    return response({...state,pendingCard:Boolean(pending),failedCatalogues:failed.results.map(r=>r.id)});
   }
   if(path==='/agent/claim'){
     const job=await sql(e,"UPDATE jobs SET state='running',lease=?,until_ts=unixepoch()+300,attempts=attempts+1 WHERE id=(SELECT j.id FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE (j.state='queued' OR (j.state='running' AND j.until_ts<unixepoch())) AND j.attempts<4 AND (SELECT paused FROM agent_state WHERE id=1)=0 ORDER BY j.created LIMIT 1) RETURNING *",crypto.randomUUID()).first();

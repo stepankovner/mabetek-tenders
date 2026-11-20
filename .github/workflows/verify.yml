@@ -41,6 +41,7 @@ jobs:
           revision=$(git rev-parse --short=12 HEAD)
           npx --yes wrangler@4 d1 execute mabetek-tenders --remote --file migrations/0003.sql
           npx --yes wrangler@4 d1 execute mabetek-tenders --remote --file migrations/0004.sql
+          npx --yes wrangler@4 d1 execute mabetek-tenders --remote --file migrations/0005.sql
           npx --yes wrangler@4 deploy --var "RELEASE:$revision" --name mabetek-zakupki --keep-vars
           for attempt in 1 2 3 4 5 6; do
             if curl -fsS --max-time 10 'https://mabetek-zakupki.flight-tracker.workers.dev/health' | jq -e --arg revision "$revision" '.release == $revision'; then

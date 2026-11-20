@@ -1,4 +1,4 @@
-import {b2bIndex,b2bTitle,publicCatalogues,publicIndex,catalogueMatch,construction} from './core.mjs';
+import {b2bIndex,b2bTitle,publicCatalogues,publicIndex,catalogueMatch,construction,infrastructureOnly} from './core.mjs';
 const catalog='https://www.b2b-center.ru/app/next/market-search/';
 const queries=['погрузочно-разгрузочные','перевалка','железнодорожный тупик','ответственное хранение','постановка вагонов','путь необщего пользования'];
 class RateLimit extends Error {
@@ -46,7 +46,7 @@ export async function b2b(e:any){
       if(old && (!c.title || old.title===c.title))continue;
       const title=c.title||b2bTitle(await page(c.url),c.id);
       batch.push(q("INSERT INTO notices(url,title,description) VALUES(?,?,'B2B-Center · место и документы требуют проверки') ON CONFLICT(url) DO UPDATE SET title=excluded.title,updated=max(unixepoch(),updated+1) WHERE title!=excluded.title",c.url,title));
-      if(!construction.test(title))batch.push(q("INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner",'b2b/'+c.id,JSON.stringify({text:'Подборка B2B-Center · проверить место исполнения\n'+title+'\n'+c.url})));
+      if(!construction.test(title)&&!infrastructureOnly(title))batch.push(q("INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner",'b2b/'+c.id,JSON.stringify({text:'Подборка B2B-Center · проверить место исполнения\n'+title+'\n'+c.url})));
 
     }
     batch.push(q("UPDATE sources SET last_ok=unixepoch(),cursor=?,last_error=NULL WHERE id='b2b'",String((index+1)%queries.length)));

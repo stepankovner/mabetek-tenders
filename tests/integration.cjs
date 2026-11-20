@@ -241,3 +241,27 @@ test('Daily background quota leaves room for a manual scan',async()=>{
   assert.equal((await check()).admitted,false);
  }finally{global.fetch=old;db.close();}
 });
+test('Unreadable Roseltorg card reaches Mac once and returns to the owner chat',async()=>{
+ const {db,env}=fixture(),old=global.fetch, messages=[];
+ global.fetch=async(url,opts)=>{
+  if(String(url).endsWith('/sendMessage')){messages.push(JSON.parse(opts.body));return Response.json({ok:true,result:{message_id:messages.length}});}
+  return new Response('',{status:503});
+ };
+ const agent=(path,data)=>worker.fetch(new Request('https://example.test/agent/'+path,{method:'POST',headers:{Authorization:'Bearer '+env.AGENT_KEY},body:JSON.stringify(data)}),env);
+ const url='https://www.roseltorg.ru/procedure/12345678/1';
+ async function watch(id){
+  await worker.fetch(new Request('https://example.test/telegram',{method:'POST',headers:{'X-Telegram-Bot-Api-Secret-Token':env.WEBHOOK_SECRET},body:JSON.stringify({update_id:id,message:{chat:{type:'private',id:1},from:{id:1},text:'/watch '+url}})}),env);
+ }
+ try{
+  db.exec("INSERT INTO owner(id) VALUES('1')");
+  await watch(1);await watch(2);
+  assert.match(messages.at(-1).text,/передана на Mac/);
+  const task=await (await agent('card-claim',{})).json();
+  assert.equal(task.url,url);assert.equal(await (await agent('card-claim',{})).json(),null);
+  const html='<div class="lot-page__left-column-lot" data-feature-favorite-lots-procedure-number="12345678" data-feature-favorite-lots-lot-number="1"><h1>Погрузка вагонов</h1></div>';
+  assert.equal((await agent('card-result',{...task,html})).status,200);
+  assert.equal(messages.at(-1).chat_id,'1');assert.match(messages.at(-1).text,/Погрузка вагонов/);
+  assert.equal((await agent('card-result',{...task,html})).status,409);
+  assert.equal(db.prepare('SELECT count(*) n FROM lots').get().n,1);
+ }finally{global.fetch=old;db.close();}
+});

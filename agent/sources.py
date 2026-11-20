@@ -3,6 +3,7 @@ import argparse
 import concurrent.futures
 import datetime
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -48,7 +49,15 @@ CATALOGUES = {
 }
 
 def fetch_catalogue(source):
-    req = urllib.request.Request(CATALOGUES[source], headers={'User-Agent':'Mabetek-Tenders/1.0', 'Accept':'text/html'})
+    return fetch_html(CATALOGUES[source])
+
+def fetch_lot_card(url):
+    if not re.fullmatch(r'https://www\.roseltorg\.ru/procedure/[A-Za-z0-9_-]+/\d+', url):
+        raise ValueError('Требуется HTTPS-ссылка на лот Росэлторга')
+    return fetch_html(url)
+
+def fetch_html(url):
+    req = urllib.request.Request(url, headers={'User-Agent':'Mabetek-Tenders/1.0', 'Accept':'text/html'})
     with urllib.request.build_opener(NoRedirect()).open(req, timeout=12) as response:
         data = response.read(3000001)
         if len(data) > 3000000 or response.headers.get_content_type() != 'text/html':

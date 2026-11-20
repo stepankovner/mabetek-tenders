@@ -168,11 +168,17 @@ export function roseltorgCard(html,input){
 }
 
 export const construction=/^(?:устройство|ремонт|строительство|реконструкция|поставка запасных частей)(?:\s|$)/iu;
+export function infrastructureOnly(title){
+  const subject=title.toLowerCase().replace(/^окпд(?:2|\s*2)?\s*[\d.]+[.:\s]*/u,'').trim();
+  // These words describe sale of the asset or preparation of engineering documentation.
+  return /^продажа\s+железнодорожных путей(?:\s|[.,;:]|$)/u.test(subject) ||
+    /^(?:оказание услуг по разработке|разработка)\s+инструкции о порядке обслуживания движения/u.test(subject);
+}
 export function catalogueMatch(title){
   // Project names after these phrases describe the buyer's facility.
   const subject=title.toLowerCase().split(/(?:для нужд|в рамках проекта|рамках проекта|для проекта|для объекта)/u)[0].trim();
   const otherService=/(?:контролю за техническим состоянием|очистке от снега|предоставлению спецтехники и автотранспорта)/u;
-  if(otherService.test(subject)||construction.test(subject))return false;
+  if(infrastructureOnly(title)||otherService.test(subject)||construction.test(subject))return false;
   if(/^поставка\s/u.test(subject)&&!/(?:с оказанием услуг|и оказание услуг|и услуги)\s/u.test(subject))return false;
   return serviceMatch(subject);
 }

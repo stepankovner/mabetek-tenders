@@ -86,3 +86,8 @@ test('Sber international registry keeps closed bids out of active notices',()=>{
  assert.equal(core.publicIndex('sberWorld',row('Bids submission')).length,1);
  assert.throws(()=>core.publicIndex('sberWorld','unavailable'));
 });
+test('Asset sale and engineering paperwork stay separate from use of railway tracks',()=>{
+ assert.equal(core.catalogueMatch('Продажа железнодорожных путей (жд тупик) необщего пользования'),false);
+ assert.equal(core.catalogueMatch('Оказание услуг по разработке инструкции о порядке обслуживания движения по пути необщего пользования'),false);
+ assert.equal(core.catalogueMatch('Аренда железнодорожного тупика для постановки вагонов'),true);
+});

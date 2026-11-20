@@ -68,7 +68,16 @@ def tick(conf):
     if status["paused"]:return
     job=request(conf,"claim",{})
     if not job:
-        from .sources import poll_fallback
+        from .sources import poll_fallback, fetch_lot_card
+        if status.get('pendingCard'):
+            task=request(conf, 'card-claim', {})
+            if task:
+                try:
+                    html=fetch_lot_card(task['url'])
+                except (OSError,ValueError,LookupError):
+                    html=''
+                request(conf, 'card-result', {**task, 'html':html})
+                return
         poll_fallback(status.get('failedCatalogues', []), _catalogue_schedule, time.monotonic(),
                       lambda result: request(conf, 'catalogue', result))
         return
