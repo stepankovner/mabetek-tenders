@@ -91,3 +91,12 @@ test('Asset sale and engineering paperwork stay separate from use of railway tra
  assert.equal(core.catalogueMatch('Оказание услуг по разработке инструкции о порядке обслуживания движения по пути необщего пользования'),false);
  assert.equal(core.catalogueMatch('Аренда железнодорожного тупика для постановки вагонов'),true);
 });
+
+test('РАД: действующие извещения и точная ссылка на оригинал',()=>{
+  const row={status:'accept',direction:'44fz',purchaseNumber:'0387200015126000082',purchaseObjectInfo:'Поставка продуктов питания (овощи консервированные)'};
+  const feed=items=>JSON.stringify({status:0,data:{count:items.length,items,hasNext:false}});
+  assert.deepEqual(core.publicIndex('rad',feed([row,{...row,status:'contract'}])),[{title:row.purchaseObjectInfo,url:'https://gz.lot-online.ru/etp_front/procedure/view/procedure/common/0387200015126000082'}]);
+  assert.deepEqual(core.publicIndex('rad',feed([])),[]);
+  assert.throws(()=>core.publicIndex('rad',JSON.stringify({status:1})));
+  assert.throws(()=>core.publicIndex('rad',feed([{...row,purchaseNumber:'bad'}])));
+});

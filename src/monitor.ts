@@ -94,7 +94,7 @@ export async function publicPoll(e:any,source:keyof typeof publicCatalogues){
   const due=await q('UPDATE sources SET next_at=unixepoch()+900 WHERE id=? AND next_at<=unixepoch() RETURNING cursor',source).first();
   if(!due)return;
   try{
-    const result=source==='roseltorg'?await readRoseltorg(due.cursor):null;
+    const result=source==='roseltorg'?await readRoseltorg(due.cursor):source==='rad'?await readRad(due.cursor):null;
     const rows=result?result.rows:publicIndex(source,await page(catalogue.url));
     const statements=noticeStatements(e,source,rows);
     statements.push(q('UPDATE sources SET last_ok=unixepoch(),last_error=NULL,cursor=? WHERE id=?',result?result.cursor:'Первая страница: '+rows.length,source));
@@ -103,6 +103,18 @@ export async function publicPoll(e:any,source:keyof typeof publicCatalogues){
     const reason=err instanceof Error && /^(HTTP \d+|Не распознана|Лимит размера)/.test(err.message)?err.message:'Источник недоступен с Worker';
     await q('UPDATE sources SET last_error=?,next_at=max(next_at,?) WHERE id=?',reason,err instanceof RateLimit?err.retryAt:0,source).run();
   }
+}
+
+async function readRad(cursor:string|null){
+  const selection=Number(cursor)||0;
+  const index=selection>=0 && selection<queries.length && Number.isInteger(selection)?selection:0;
+  const url=new URL(publicCatalogues.rad.url);
+  url.search=new URLSearchParams({
+    'filter[*][condition]':'match','filter[*][property]':'*','filter[*][value]':queries[index],
+    'filter[status][condition]':'in','filter[status][property]':'status','filter[status][value][0]':'accept',
+    'sort[0][property]':'publicationDateTime','sort[0][direction]':'DESC',limit:'25',offset:'0'
+  }).toString();
+  return {rows:publicIndex('rad',await page(url.href)),cursor:String((index+1)%queries.length)};
 }
 
 async function readRoseltorg(stored:string|null){

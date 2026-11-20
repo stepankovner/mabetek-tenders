@@ -76,7 +76,7 @@ async function pollAll(e:Env,background=false){
   const {limit,reserve}=scanBudget(e);
   const daily=await sql(e,"INSERT INTO scan_usage(day,total,background) SELECT date('now'),1,? WHERE ?>0 AND (?=0 OR ?>0) ON CONFLICT(day) DO UPDATE SET total=total+1,background=background+excluded.background WHERE total<? AND (?=0 OR background<?) RETURNING total",Number(background),limit,Number(background),limit-reserve,limit,Number(background),limit-reserve).first();
   if(!daily)return false;
-  await Promise.all([poll(e),b2b(e),publicPoll(e,'roseltorg'),publicPoll(e,'tektorg'),publicPoll(e,'gpb'),publicPoll(e,'sberWorld')]);
+  await Promise.all([poll(e),b2b(e),publicPoll(e,'roseltorg'),publicPoll(e,'tektorg'),publicPoll(e,'gpb'),publicPoll(e,'sberWorld'),publicPoll(e,'rad')]);
   return true;
 }
 async function deliver(e:Env) {

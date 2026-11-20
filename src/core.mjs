@@ -86,6 +86,7 @@ export function b2bTitle(html,id) {
 }
 
 export const publicCatalogues={
+  rad:{name:'РАД · 44-ФЗ',url:'https://gz.lot-online.ru/etp_back/procedure/list'},
   sberWorld:{name:'Сбербанк-АСТ · международная секция',url:'https://world.sberbank-ast.ru/tableForm.aspx?formCode=PurchaseList'},
   roseltorg:{name:'Росэлторг',url:'https://www.roseltorg.ru/procedures/search'},
   tektorg:{name:'ТЭК-Торг',url:'https://www.tektorg.ru/procedures'},
@@ -106,6 +107,14 @@ export function sberRegistry(html){
   return rows;
 }
 export function publicIndex(source,html) {
+  if(source==='rad'){
+    const {status,data}=JSON.parse(html);
+    if(status!==0 || !Array.isArray(data?.items) || !Number.isSafeInteger(data.count) || data.count<data.items.length)throw Error('Не распознана выдача РАД');
+    return data.items.filter(row=>row.direction==='44fz' && row.status==='accept').map(row=>{
+      if(!/^\d{19}$/.test(row.purchaseNumber)||typeof row.purchaseObjectInfo!=='string'||!row.purchaseObjectInfo.trim())throw Error('Не распознана карточка РАД');
+      return {url:'https://gz.lot-online.ru/etp_front/procedure/view/procedure/common/'+row.purchaseNumber,title:row.purchaseObjectInfo.trim()};
+    });
+  }
   if(source==='sberWorld')return sberRegistry(html).filter(r=>/^(?:Bids submission|Submission of bids|Accepting bids)$/i.test(r.status));
 
   const catalogue=publicCatalogues[source];

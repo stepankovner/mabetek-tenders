@@ -166,7 +166,8 @@ test('Publish smoke reports its revision and permits live polling only to the Ma
    assert.equal((await check('wrong')).status,403);
    const res=await check(env.AGENT_KEY);
    const status=await res.json();
-   assert.equal(status.sources.length,6);
+   assert.equal(status.sources.length,7);
+   assert.ok(status.sources.some(s=>s.id==='rad'));
    assert.ok(status.sources.every(s=>s.last_error&&!s.last_ok));
  } finally{db.close();global.fetch=previous;}
 });
