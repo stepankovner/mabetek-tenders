@@ -176,8 +176,18 @@ async function telegram(req:Request,e:Env){
       const [,lot,rev]=text.split(' ');
       const valid=await sql(e,'SELECT id FROM lots WHERE id=? AND revision=?',lot||'',rev||'').first();
       if(!valid){reply='Карточка устарела.';break;}
+      const job=await sql(e,"SELECT state,until_ts,attempts,id FROM jobs WHERE lot=? AND revision=? AND op='analysis'",lot,rev).first();
+      if(job?.state==='done'){
+        const delivered=await sql(e,'SELECT payload FROM outbox WHERE dedupe=? AND owner=?','job/'+job.id,user).first();
+        reply='Разбор готов.'+(delivered?'\n'+JSON.parse(delivered.payload).text:'');break;
+      }
+      if(job?.state==='running' && job.until_ts>=now()){reply='Mac обрабатывает документы.';break;}
+      const agent=await sql(e,'SELECT seen,paused FROM agent_state WHERE id=1').first();
       mutations.push(sql(e,"INSERT INTO jobs(lot,revision,op) VALUES(?,?,'analysis') ON CONFLICT(lot,revision,op) DO UPDATE SET state='queued',attempts=0 WHERE jobs.state='running' AND jobs.until_ts<unixepoch() AND jobs.attempts>=4",lot,rev));
-      reply='Задача разбора зарегистрирована. Состояние Mac доступно в /status.';break;
+      if(agent?.paused)reply='Разбор в очереди. Mac на паузе. Возобновить: /resume';
+      else if(!agent?.seen || agent.seen<now()-180)reply='Разбор ожидает подключения Mac.';
+      else reply='Разбор поставлен в очередь на Mac.';
+      break;
     }
     case '/check':
       await pollAll(e);reply='Проверка обработана с учётом интервала опроса. Результат в /status.';break;

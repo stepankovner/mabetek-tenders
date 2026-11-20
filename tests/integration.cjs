@@ -60,7 +60,9 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    assert.match(sent.at(-1).text,/приложени/i);
    await talk('/analyze 1 1');await talk('/analyze 1 1');
    const job=await agent('claim',{});assert.equal(job.op,'analysis');assert.equal(await agent('claim',{}),null);
+   await talk('/analyze 1 1');assert.match(sent.at(-1).text,/обрабатывает/i);
    await agent('result',{id:job.id,lease:job.lease,text:'результат'});
+   await talk('/analyze 1 1');assert.match(sent.at(-1).text,/готов/i);
    await talk('/terms 1 1');
    for(const input of ['Выгрузка','1.5','т','3.33','без НДС','1 декабря','после акта','25 ноября','1'])await talk(input);
    const approval=sent.at(-1);assert.match(approval.text,/5.00 ₽/);
