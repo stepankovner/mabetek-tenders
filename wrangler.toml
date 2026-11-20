@@ -1,0 +1,13 @@
+name = "mabetek-tenders"
+main = "src/worker.ts"
+compatibility_date = "2025-06-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mabetek-tenders"
+database_id = "a385b43a-b190-4d9d-9455-a9bfcd71a82d"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["*/15 * * * *"]

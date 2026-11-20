@@ -1,0 +1,100 @@
+[
+  {
+    "name": "ЕИС",
+    "url": "https://zakupki.gov.ru/epz/order/extendedsearch/results.html",
+    "checked_at": "2026-11-20T12:17:13.555314+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "РТС, секция РЖД",
+    "url": "https://rzd.rts-tender.ru/",
+    "checked_at": "2026-11-20T12:17:13.555729+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "ЕАТ Берёзка",
+    "url": "https://agregatoreat.ru/",
+    "checked_at": "2026-11-20T12:17:13.555801+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "B2B-Center",
+    "url": "https://www.b2b-center.ru/market/",
+    "checked_at": "2026-11-20T12:17:13.638575+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "ЭТП ГПБ",
+    "url": "https://etpgpb.ru/",
+    "checked_at": "2026-11-20T12:17:13.638627+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "ТЭК-Торг",
+    "url": "https://www.tektorg.ru/",
+    "checked_at": "2026-11-20T12:17:13.638663+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "Роснефть",
+    "url": "https://zakupki.rosneft.ru/",
+    "checked_at": "2026-11-20T12:17:13.679707+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "Росэлторг",
+    "url": "https://www.roseltorg.ru/",
+    "checked_at": "2026-11-20T12:17:13.679762+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "Сбербанк-АСТ",
+    "url": "https://www.sberbank-ast.ru/",
+    "checked_at": "2026-11-20T12:17:13.679808+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "Фабрикант",
+    "url": "https://www.fabrikant.ru/",
+    "checked_at": "2026-11-20T12:17:13.720545+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "ЗаказРФ",
+    "url": "https://zakazrf.ru/",
+    "checked_at": "2026-11-20T12:17:13.720650+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "РАД",
+    "url": "https://lot-online.ru/",
+    "checked_at": "2026-11-20T12:17:13.720735+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "OTC",
+    "url": "https://otc.ru/",
+    "checked_at": "2026-11-20T12:17:13.761973+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  },
+  {
+    "name": "Хабаровский край",
+    "url": "https://gz.khabkrai.ru/",
+    "checked_at": "2026-11-20T12:17:13.762046+00:00",
+    "adapter_confirmed": false,
+    "status": "<urlopen error [Errno 8] nodename nor servname provided, or not known>"
+  }
+]

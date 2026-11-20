@@ -6,10 +6,10 @@ FFF
 FAIL: test_document (test_pipeline.Contracts.test_document)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/Users/stepankovner/Documents/ChatGPT/mabetek/mabetek-tenders/tests/test_pipeline.py", line 50, in test_document
+  File "mabetek-tenders/tests/test_pipeline.py", line 50, in test_document
     extract=self.feature("extract")
             ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/stepankovner/Documents/ChatGPT/mabetek/mabetek-tenders/tests/test_pipeline.py", line 19, in feature
+  File "mabetek-tenders/tests/test_pipeline.py", line 19, in feature
     self.assertTrue(callable(fn), f"Отсутствует операция {name}")
 AssertionError: False is not true : Отсутствует операция extract
 
@@ -17,10 +17,10 @@ AssertionError: False is not true : Отсутствует операция extr
 FAIL: test_filter (test_pipeline.Contracts.test_filter)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/Users/stepankovner/Documents/ChatGPT/mabetek/mabetek-tenders/tests/test_pipeline.py", line 23, in test_filter
+  File "mabetek-tenders/tests/test_pipeline.py", line 23, in test_filter
     classify = self.feature("classify")
                ^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/stepankovner/Documents/ChatGPT/mabetek/mabetek-tenders/tests/test_pipeline.py", line 19, in feature
+  File "mabetek-tenders/tests/test_pipeline.py", line 19, in feature
     self.assertTrue(callable(fn), f"Отсутствует операция {name}")
 AssertionError: False is not true : Отсутствует операция classify
 
@@ -28,10 +28,10 @@ AssertionError: False is not true : Отсутствует операция clas
 FAIL: test_pdf (test_pipeline.Contracts.test_pdf)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/Users/stepankovner/Documents/ChatGPT/mabetek/mabetek-tenders/tests/test_pipeline.py", line 70, in test_pdf
+  File "mabetek-tenders/tests/test_pipeline.py", line 70, in test_pdf
     render=self.feature("render")
            ^^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/stepankovner/Documents/ChatGPT/mabetek/mabetek-tenders/tests/test_pipeline.py", line 19, in feature
+  File "mabetek-tenders/tests/test_pipeline.py", line 19, in feature
     self.assertTrue(callable(fn), f"Отсутствует операция {name}")
 AssertionError: False is not true : Отсутствует операция render
 
@@ -39,10 +39,10 @@ AssertionError: False is not true : Отсутствует операция rend
 FAIL: test_quote (test_pipeline.Contracts.test_quote)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/Users/stepankovner/Documents/ChatGPT/mabetek/mabetek-tenders/tests/test_pipeline.py", line 38, in test_quote
+  File "mabetek-tenders/tests/test_pipeline.py", line 38, in test_quote
     quote = self.feature("quote")
             ^^^^^^^^^^^^^^^^^^^^^
-  File "/Users/stepankovner/Documents/ChatGPT/mabetek/mabetek-tenders/tests/test_pipeline.py", line 19, in feature
+  File "mabetek-tenders/tests/test_pipeline.py", line 19, in feature
     self.assertTrue(callable(fn), f"Отсутствует операция {name}")
 AssertionError: False is not true : Отсутствует операция quote
 
@@ -50,7 +50,7 @@ AssertionError: False is not true : Отсутствует операция quot
 FAIL: test_schema (test_pipeline.Contracts.test_schema)
 ----------------------------------------------------------------------
 Traceback (most recent call last):
-  File "/Users/stepankovner/Documents/ChatGPT/mabetek/mabetek-tenders/tests/test_pipeline.py", line 66, in test_schema
+  File "mabetek-tenders/tests/test_pipeline.py", line 66, in test_schema
     self.assertFalse({"sources","lots","versions","answers","jobs","outbox","sessions","updates","profile","evidence","documents","offers","links"}-tables)
 AssertionError: {'versions', 'offers', 'jobs', 'sessions', 'sources', 'updates', 'profile', 'outbox', 'answers', 'links', 'evidence', 'lots', 'documents'} is not false
 

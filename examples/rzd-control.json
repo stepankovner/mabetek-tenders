@@ -1,0 +1,18 @@
+{
+  "source": "rzd-rts",
+  "procedure": "3493/ЗКТЭ-ЦМ/26",
+  "eis": "32616584495",
+  "lot": "номер требует проверки",
+  "title": "Оказание услуг по погрузке и выгрузке грузов",
+  "customer": "ОАО «Российские железные дороги»",
+  "place": "",
+  "region": "Хабаровский край",
+  "place_note": "Конкретное место указано в техническом задании",
+  "initial_price_minor": 409365693,
+  "currency": "RUB",
+  "deadline": "2026-11-23T23:00:00Z",
+  "deadline_original": "24.11.2026 02:00 МСК",
+  "url": "https://rzd.rts-tender.ru/TenderInterests/LogViewAndRedirect?tenderId=24233643&tenderStatus=RTS_Notification",
+  "checked": "2026-11-20",
+  "purpose": "Контрольный пример разработки. До выпуска КП требуется установить номер лота, проверить приложения и актуальное извещение."
+}
