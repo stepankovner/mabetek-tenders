@@ -70,9 +70,15 @@ def analysis_message(card,evidence):
         buyer="Какие условия допуска персонала и порядок согласования смен на указанной площадке?"
     elif own_site and verdict in ("рассмотреть", "нужно уточнение"):
         buyer="Какие типы вагонов, объёмы и даты заказчик подтвердит для согласования?"
-    parts=[title,"Оценка: "+verdict+" — "+reason,"Сведения из документов: "+(evidence[:2000] or place or "не указано"),
-           "Мабетэк: два пути 125 и 111 м на Батуевской Ветке, 19. Погрузка и выгрузка по заявке.",
-           "Вопросы семье: "+family,"Вопросы заказчику: "+buyer,"Оригинал: "+card["url"]]
+    parts = [title, "Оценка: "+verdict+" — "+reason]
+    if card.get("place"):
+        parts.append("Место из карточки: "+card["place"][:500])
+    if evidence:
+        parts.append("Сведения из приложений: "+evidence[:1800])
+    elif card.get("documentsPage"):
+        parts.append("Приложения для сверки: "+card["documentsPage"])
+    parts.extend(("Мабетэк: два пути 125 и 111 м на Батуевской Ветке, 19. Погрузка и выгрузка по заявке.",
+                  "Вопросы семье: "+family, "Вопросы заказчику: "+buyer, "Оригинал: "+card["url"]))
     return "\n".join(parts)
 
 _catalogue_schedule = {}
