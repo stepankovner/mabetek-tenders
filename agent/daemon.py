@@ -78,6 +78,8 @@ def analysis_message(card,evidence):
 _catalogue_schedule = {}
 _collector_threads = {}
 _collector_due = {}
+_collector_failures = {}
+_collectors_paused = None
 
 
 def start_collector(conf, source, name, collect):
@@ -88,10 +90,13 @@ def start_collector(conf, source, name, collect):
         return
 
     def run():
+        from .sources import retry_after
         reason = None
+        retry = 0
         try:
             result = collect()
             reason = result.get('reason')
+            retry = result.get('retry_after', 0)
             partial = reason is not None
             ok = not partial
             detail = f"{result['unique']} карточек, добавлено {result['inserted']}"
@@ -115,6 +120,16 @@ def start_collector(conf, source, name, collect):
                         break
             if isinstance(exc, urllib.error.HTTPError):
                 detail += f" HTTP {exc.code}"
+                if exc.code == 429:
+                    retry = retry_after(exc.headers)
+        if ok or partial:
+            _collector_failures.pop(name, None)
+        else:
+            failures = min(3, _collector_failures.get(name, 0) + 1)
+            _collector_failures[name] = failures
+            retry = max(retry, 900 * 2 ** (failures - 1))
+        if retry:
+            _collector_due[name] = max(_collector_due[name], time.monotonic() + retry)
         try:
             request(conf, 'scan-report', dict(source=source, ok=ok, reason=reason, partial=partial))
         except (OSError, ValueError) as err:
@@ -148,8 +163,16 @@ def schedule_catalogues(conf):
 
 
 def tick(conf):
-    status=request(conf,"heartbeat",{"free_bytes":shutil.disk_usage(CONFIG.parent).free})
-    if status["paused"]:return
+    global _collectors_paused
+    try:
+        status=request(conf,"heartbeat",{"free_bytes":shutil.disk_usage(CONFIG.parent).free})
+    except OSError:
+        # Continue collecting to SQLite while the cloud is briefly unavailable.
+        if _collectors_paused is False:
+            schedule_catalogues(conf)
+        raise
+    _collectors_paused = bool(status["paused"])
+    if _collectors_paused:return
     schedule_catalogues(conf)
     job=request(conf,"claim",{})
     if not job:

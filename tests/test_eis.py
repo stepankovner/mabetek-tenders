@@ -47,6 +47,11 @@ class EIS(unittest.TestCase):
                 result = collect('price_requests', path)
                 self.assertEqual(result['inserted'], 1)
                 self.assertEqual(result['reason'], 'eis_pagination_404')
+            throttled = HTTPError('https://zakupki.gov.ru/', 429, 'Too Many Requests', {'Retry-After':'1800'}, None)
+            with patch('agent.eis_catalogue.read_page', side_effect=[first, throttled]):
+                result = collect('price_requests', path)
+                self.assertEqual(result['retry_after'], 1800)
+                self.assertEqual(result['inserted'], 0)
             with patch('agent.eis_catalogue.read_page', side_effect=[first, second]) as read:
                 self.assertEqual(collect('price_requests', path)['inserted'], 1)
                 self.assertEqual(read.call_args.args, ('price_requests', 2))

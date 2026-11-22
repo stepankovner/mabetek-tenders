@@ -4,6 +4,18 @@ from unittest.mock import patch
 from agent.sources import fetch_catalogue, poll_fallback
 
 class SourceFallback(unittest.TestCase):
+    def test_local_catalogues_keep_running_when_worker_disappears_after_resume(self):
+        from agent import daemon
+        for state, expected in ((False, 1), (True, 0), (None, 0)):
+            with (self.subTest(last_known_pause=state),
+                    patch.object(daemon, '_collectors_paused', state),
+                    patch.object(daemon, 'request', side_effect=OSError('Network down')),
+                    patch.object(daemon, 'schedule_catalogues') as schedule,
+                    patch.object(daemon.shutil, 'disk_usage')):
+                with self.assertRaises(OSError):
+                    daemon.tick({})
+                self.assertEqual(schedule.call_count, expected)
+
     @patch('agent.sources.fetch_catalogue', return_value='<html>catalogue</html>')
     def test_due_sources_rotate_and_do_not_fetch_unknown_urls(self, fetch):
         saved, schedule = [], {}

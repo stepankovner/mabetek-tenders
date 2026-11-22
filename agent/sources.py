@@ -2,9 +2,12 @@
 import argparse
 import concurrent.futures
 import datetime
+from email.utils import parsedate_to_datetime
 import json
+import math
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from xml.etree import ElementTree as ET
@@ -27,6 +30,18 @@ SOURCES={
 }
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self,*args): return None
+
+def retry_after(headers, *, now=None):
+    value = (headers.get('Retry-After') or '').strip() if headers else ''
+    if value.isascii() and value.isdecimal() and len(value) < 10:
+        return max(900, int(value))
+    try:
+        deadline = parsedate_to_datetime(value)
+        if deadline.tzinfo is None:
+            return 900
+        return max(900, math.ceil(deadline.timestamp() - (time.time() if now is None else now)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return 900
 
 def probe(pair):
     name,url=pair

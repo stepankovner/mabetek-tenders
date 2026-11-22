@@ -10,7 +10,7 @@ from urllib.parse import urljoin
 
 from .eat_import import ingest, publish_candidates
 from .local import connection
-from .sources import NoRedirect
+from .sources import NoRedirect, retry_after
 
 HOST = "https://zakupki.gov.ru"
 REGISTRIES = {
@@ -140,6 +140,8 @@ def collect(registry, path, publish=None):
             except (OSError, ValueError) as error:
                 result["reason"] = ("eis_pagination_404" if isinstance(error, HTTPError)
                                     and error.code == 404 else "eis_pagination_unavailable")
+                if isinstance(error, HTTPError) and error.code == 429:
+                    result["retry_after"] = retry_after(error.headers)
                 return result
             second = ingest(db, extra)
             if publish is not None:
