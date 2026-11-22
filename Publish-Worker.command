@@ -13,10 +13,5 @@ else
   npx --yes --package typescript@5.9.3 -c 'node --test tests/*.mjs tests/integration.cjs'
 fi
 set -o pipefail
-npx --yes wrangler@4 d1 execute mabetek-tenders --remote --yes --file migrations/0003.sql
-npx --yes wrangler@4 d1 execute mabetek-tenders --remote --yes --file migrations/0004.sql
-npx --yes wrangler@4 d1 execute mabetek-tenders --remote --yes --file migrations/0005.sql
-revision=$(git rev-parse --short=12 HEAD)
-npx --yes wrangler@4 deploy --var "RELEASE:$revision" --name mabetek-zakupki --keep-vars 2>&1 | tee .private/deploy-latest.log
-
+revision=$(bash tools/publish-worker.sh)
 python3 -m agent.deployment_check "$revision"

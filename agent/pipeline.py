@@ -3,6 +3,7 @@ import hashlib
 import io
 import os
 import re
+import subprocess
 import zipfile
 from decimal import Decimal, ROUND_HALF_UP
 from html import escape
@@ -13,21 +14,30 @@ import pymupdf
 from .ocr import recognize
 
 MAX_BYTES = 32 * 1024 * 1024
-SERVICE = re.compile(r"тупик|пут[ьи].{0,18}необщего|постановк.{0,20}вагон|прием.{0,26}(?:вагон|железнодорож)|перевалк|(?:выгрузк|погрузк).{0,40}(?:вагон|груз)|склад.{0,30}(?:подъездн|железнодорож|жд)|перегрузк|\bпрр\b")
+SERVICE = re.compile(r"тупик|пут[ьи].{0,18}необщего|постановк.{0,20}вагон|прием.{0,26}(?:вагон|железнодорож)|перевалк|погрузочно[-\s]разгрузочн\w*\s+(?:работ|услуг)|(?:выгрузк|разгрузк|погрузк).{0,40}(?:вагон|груз)|склад.{0,30}(?:подъездн|железнодорож|жд)|перегрузк|\bпрр\b")
 MIXED = re.compile(r"топлив|опасн.{0,12}груз|локомотив|транспортировк|перевозк")
 
 def classify(title, place):
     text = re.sub(r"ж\s*[/.-]\s*д", "жд", title.lower().replace("ё","е"))
+    text = re.sub(r"(?:без(?:\s+учета)?|за\s+исключением)\s+погрузочно[-\s]разгрузочных\s+(?:работ|услуг)\b", " ", text)
     match = SERVICE.search(text)
     if not match:
         if re.search(r"ремонт|закупка вагонов|поставка вагонов", text):
             return "отклонить", "Предмет закупки вне профиля"
         return "недостаточно исходных данных", "Требуется проверка документации"
-    if re.search(r"\bванино\b|владивосток|комсомольск-на-амуре",place.lower()):
+    if re.search(r"\b(?:ванино|беркакит)\b|владивосток|комсомольск-на-амуре",place.lower()):
         return "отклонить", "Указано иное место исполнения: " + place
     if MIXED.search(text) or not re.search(r"\bхабаровск(?:е)?\b",place.lower()):
         return "нужно уточнение", "Уточнить площадку и состав обязательных услуг"
     return "рассмотреть", match.group()
+
+def catalogue_subject(card):
+    if card.get('source') == 'rts-rzd-search':
+        for position in card.get('positions', []):
+            if classify(position, '')[0] in ('рассмотреть', 'нужно уточнение'):
+                return position
+    return card['title']
+
 
 def extract(path):
     path = Path(path)
@@ -39,6 +49,16 @@ def _extract(name, data, depth, budget):
     def row(loc,text,ocr=False):
         return dict(file=name,sha256=digest,location=loc,text=text,ocr=ocr)
     ext=Path(name).suffix.lower()
+    if ext == ".doc":
+        if not data.startswith(bytes.fromhex("d0cf11e0a1b11ae1")):
+            raise ValueError("Неверная сигнатура DOC")
+        try:
+            result = subprocess.run(
+                ["/usr/bin/textutil", "-format", "doc", "-convert", "txt", "-encoding", "UTF-8",
+                 "-stdin", "-stdout"], input=data, capture_output=True, check=True, timeout=15)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError("Не удалось прочитать DOC через textutil") from exc
+        return [row(f"строка {n}", line) for n, line in enumerate(result.stdout.decode().split("\n"), 1)]
     if ext==".pdf":
         rows=[]
         with pymupdf.open(stream=data,filetype="pdf") as pdf:

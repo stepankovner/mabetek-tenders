@@ -65,11 +65,14 @@ def summarize(rows):
         text = row['text'].strip()
         if not re.match(r'^(?:[0-9.]+\s*)?мест[оа] (?:выполнения работ|оказания услуг|исполнения)', text, re.I):
             continue
-        if len(text) < 45 and i+1 < len(rows):
+        location = row['location']
+        if (re.fullmatch(r'(?:[0-9.]+\s*)?мест[оа] (?:выполнения работ|оказания услуг|исполнения)[ :]*', text, re.I)
+                and i+1 < len(rows) and rows[i+1]['file'] == row['file']):
+            location += ' / ' + rows[i+1]['location']
             text += ' '+rows[i+1]['text'].strip()
         if re.search('указано в техническом|указывается|указываются',text,re.I):
             continue
-        found.append(f"{row['file']}, {row['location']}: {text[:250]}")
+        found.append(f"{row['file']}, {location}: {text[:250]}")
     return '\n'.join(found[:2])
 
 def form_evidence(rows):
@@ -89,6 +92,30 @@ def form_evidence(rows):
     return 'Формы заказчика:\n' + '\n'.join(result[:7])
 
 
+def cached_attachment(cache, name, link):
+    """Reuse one unambiguous, intact copy of an attachment still listed on the card."""
+    matches = []
+    for index in cache.glob('*.json'):
+        digest = index.stem
+        if not re.fullmatch(r'[a-f0-9]{64}', digest):
+            continue
+        try:
+            meta = json.loads(index.read_text(encoding='utf8'))
+            if not isinstance(meta, dict) or (meta.get('name'), meta.get('url'), meta.get('sha256')) != (name, link, digest):
+                continue
+            target = index.with_suffix(Path(name).suffix.lower())
+            if target.stat().st_size > MAX_BYTES:
+                continue
+            data = target.read_bytes()
+        except (OSError, ValueError):
+            continue
+        if hashlib.sha256(data).hexdigest() == digest:
+            matches.append(data)
+            if len(matches) > 1:
+                return None
+    return matches[0] if matches else None
+
+
 def review(card, cache):
     url = urlsplit(card['url'])
     ident = parse_qs(url.query).get('tenderId',[''])[0]
@@ -101,7 +128,13 @@ def review(card, cache):
     fragments = []
     for name, link in attachments[:6]:
         try:
-            data = fetch(link, MAX_BYTES)
+            try:
+                data = fetch(link, MAX_BYTES)
+            except OSError:
+                data = cached_attachment(cache, name, link)
+                if data is None:
+                    raise
+                notes.append(f'{name}: сервер приложения недоступен. Использована сохранённая копия с проверенной SHA-256. Актуальность содержимого не подтверждена.')
             digest = hashlib.sha256(data).hexdigest()
             suffix = Path(name).suffix.lower()
             target = cache/(digest+suffix)
@@ -109,13 +142,7 @@ def review(card, cache):
                 with tempfile.NamedTemporaryFile(dir=cache, delete=False) as f:
                     f.write(data)
                 Path(f.name).replace(target)
-            if suffix == '.doc':
-                if not data.startswith(bytes.fromhex('d0cf11e0a1b11ae1')):
-                    raise ValueError('Неверная сигнатура DOC')
-                result=subprocess.run(['/usr/bin/textutil','-convert','txt','-stdout',str(target)],capture_output=True,check=True,timeout=15)
-                rows=[dict(location=f'строка {i}',text=t) for i,t in enumerate(result.stdout.decode().splitlines(),1)]
-            else:
-                rows = extract(target)
+            rows = extract(target)
             for row in rows:
                 row['file'] = name
             fragments.extend(select_fragments(rows))
@@ -132,5 +159,5 @@ def review(card, cache):
         notes.append('Обработаны первые шесть приложений.')
     if not notes:
         notes.append('Конкретное место в обработанных приложениях установить не удалось.')
-    notes.append(analyze(fragments[:48],cache.parent.parent))
+    notes.append(analyze(select_fragments(fragments),cache.parent.parent))
     return '\n'.join(notes)

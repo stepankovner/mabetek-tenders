@@ -46,12 +46,12 @@ function packageWord(files:Record<string,string>){
   end.u16(8,count);end.u16(10,count);end.u32(12,directory.reduce((a,b)=>a+b.length,0));end.u32(16,offset);
   return new Blob([...entries,...directory,end.bytes],{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
 }
-export function draftWord(lot:string,vat:string){
+export function draftWord(lot:string,vat:string,deliveryTest=false){
   if(lot!=='' && !/^\d{1,9}$/.test(lot))throw Error('Укажите числовой номер лота из оригинала.');
   // Free text can mention several rates, negation or exemptions. Only an explicit affirmative rate is transferable.
   const rate=vat.trim().match(/^(?:ндс\s+)?(100|[1-9]?\d)(?:[.,](\d{1,2}))?\s*%\s*(?:(?:в том числе|включ[её]н(?: в (?:ставку|цену))?)[.!]?)?$/iu);
   const value=rate && Number(rate[1]+'.'+(rate[2]||0))<=100 ? rate[1]+(rate[2]?','+rate[2]:'') : '____';
-  const doc='<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Черновик для проверки владельцем. Извещение 32616584495, лот '+(lot||'____')+'.</w:t></w:r></w:p>'+paragraphs.replace('____',value)+'</w:body></w:document>';
+  const doc='<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>'+(deliveryTest?'ТЕСТ ДОСТАВКИ. Учебные данные. Для подачи не используется. ':'')+'Черновик для проверки владельцем. Извещение 32616584495, лот '+(lot||'____')+'.</w:t></w:r></w:p>'+paragraphs.replace('____',value)+'</w:body></w:document>';
   const file=packageWord({
     '[Content_Types].xml':'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
     '_rels/.rels':'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',

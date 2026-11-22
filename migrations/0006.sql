@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS telegram_cooldown (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  until_ts INTEGER NOT NULL
+);
