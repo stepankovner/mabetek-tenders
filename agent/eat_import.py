@@ -1,6 +1,7 @@
 """Import the public browser collector's JSON into the local inbox."""
 import argparse
 from contextlib import closing
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -46,27 +47,39 @@ def ingest(db, cards):
     return dict(unique=len(cards),inserted=inserted,differences=differences)
 
 
-def publish_candidates(db, cards, publish):
+def publish_candidates(db, cards, publish, *, sample_nonmatches=False):
     # Retry while the catalogue still shows the procedure as open.
     db.execute("CREATE TABLE IF NOT EXISTS eat_receipts(url TEXT PRIMARY KEY, title TEXT NOT NULL)")
+    if sample_nonmatches:
+        db.execute("CREATE TABLE IF NOT EXISTS review_receipts(url TEXT PRIMARY KEY, title TEXT NOT NULL)")
     attempted = 0
+    candidates = []
+    sample = []
     for card in cards:
         title = catalogue_subject(card)[:4000]
-        if classify(title, '')[0] not in ('рассмотреть', 'нужно уточнение'):
-            continue
-        if db.execute("SELECT 1 FROM eat_receipts WHERE url=? AND title=?",
+        if classify(title, '')[0] in ('рассмотреть', 'нужно уточнение'):
+            candidates.append((card, title, False))
+        elif sample_nonmatches:
+            sample.append((hashlib.sha256(card['url'].encode()).digest(), card, title))
+    # One stable sample per page for semantic review, after normal notifications.
+    sample.sort(key=lambda item: item[0])
+    for card, title, review in candidates + [(card, title, True) for _, card, title in sample]:
+        receipts = 'review_receipts' if review else 'eat_receipts'
+        if db.execute(f"SELECT 1 FROM {receipts} WHERE url=? AND title=?",
                       (card['url'], title)).fetchone():
             continue
         payload = dict(procedure=card['procedure'], url=card['url'], title=title)
         if card.get('source') == 'comita-rzd' and card.get('published'):
             payload['published'] = card['published']
+        if review:
+            payload['review'] = True
         reply = publish(payload)
         if reply.get('status') not in ('accepted', 'filtered'):
             raise ValueError('Worker не подтвердил обработку карточки ЕАТ')
         with db:
-            db.execute("INSERT OR REPLACE INTO eat_receipts VALUES(?,?)", (card['url'], title))
+            db.execute(f"INSERT OR REPLACE INTO {receipts} VALUES(?,?)", (card['url'], title))
         attempted += 1
-        if attempted == 3:
+        if attempted == 3 or review:
             break
 
 

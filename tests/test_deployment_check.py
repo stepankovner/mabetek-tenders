@@ -6,6 +6,12 @@ from agent import deployment_check as check
 
 
 class SourceHealth(unittest.TestCase):
+    @patch.object(check, 'settings', return_value={})
+    @patch.object(check, 'request', return_value={'sources': []})
+    def test_uses_read_only_status_after_deploy(self, request, _):
+        self.assertEqual(check.source_status()[0], {'sources': []})
+        request.assert_called_once_with({}, 'status', {})
+
     @patch.object(check.subprocess, 'run')
     @patch.object(check, 'settings', return_value={})
     @patch.object(check, 'request', side_effect=urllib.error.HTTPError('https://example.org', 404, 'not found', {}, None))

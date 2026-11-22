@@ -72,14 +72,14 @@ export function queueEisNotice(e:any,url:string,payload:string){
   return e.DB.prepare(query+' WHERE NOT EXISTS(SELECT 1 FROM outbox WHERE dedupe IN (?,?,?))').bind(...args,...aliases);
 }
 
-export function noticeStatements(e:any,source:keyof typeof publicCatalogues | "eat" | "comita-rzd" | "rts-rzd-search" | "otc-khab" | "eis-orders" | "eis-price_requests",rows:{title:string,url:string,published?:string|null}[]){
+export function noticeStatements(e:any,source:keyof typeof publicCatalogues | "eat" | "comita-rzd" | "rts-rzd-search" | "otc-khab" | "eis-orders" | "eis-price_requests",rows:{title:string,url:string,published?:string|null}[],notify=true){
   const catalogue=source==='eis-orders'?{name:'ЕИС · закупки'}:source==='eis-price_requests'?{name:'ЕИС · запросы цен'}:source==='otc-khab'?{name:'OTC · Хабаровский край'}:source==='eat'?{name:'ЕАТ Берёзка'}:source==='rts-rzd-search'?{name:'РТС · РЖД'}:source==='comita-rzd'?{name:'КОМИТА РЖД · Хабаровский край'}:publicCatalogues[source];
   const q=(s:string,...params:unknown[])=>e.DB.prepare(s).bind(...params);
     const statements=[];
     const notifications:number[]=[];
     for(const row of rows){
       statements.push(q('INSERT INTO notices(url,title,description,published) VALUES(?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,published=coalesce(excluded.published,notices.published),updated=max(unixepoch(),updated+1) WHERE title!=excluded.title OR (excluded.published IS NOT NULL AND notices.published IS NOT excluded.published)',row.url,row.title,catalogue.name,row.published||null));
-      if(!catalogueMatch(row.title))continue;
+      if(!notify||!catalogueMatch(row.title))continue;
       const message=catalogue.name+' · проверить место исполнения\n'+row.title.slice(0,600)+'\n'+row.url;
       const lot=source==='roseltorg'?new URL(row.url).pathname.match(/^\/procedure\/([\w-]+\/\d+)$/)?.[1]:null;
       const payload=lot&&lot.length<=55?{text:message,reply_markup:{inline_keyboard:[[{text:'Открыть карточку',callback_data:'/ros '+lot}]]}}:{text:message};

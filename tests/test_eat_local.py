@@ -43,6 +43,28 @@ class ScheduledImport(unittest.TestCase):
         finally:
             db.close()
 
+    def test_eis_sampling_follows_lexical_matches_and_uses_separate_receipts(self):
+        import sqlite3
+        from agent.eat_import import publish_candidates
+        cards = [dict(source='eis-orders', title=title, url='https://example.org/'+n, procedure=n)
+                 for n, title in [('1','Поставка мебели'),('2','Выгрузка вагонов'),('3','Поставка компьютеров')]]
+        delivered = []
+        def publish(row):
+            delivered.append(row)
+            return {'status':'filtered' if row.get('review') else 'accepted'}
+        db = sqlite3.connect(':memory:')
+        try:
+            publish_candidates(db, cards, publish, sample_nonmatches=True)
+            self.assertEqual([row.get('review', False) for row in delivered], [False, True])
+            self.assertEqual(delivered[0]['procedure'], '2')
+            self.assertEqual(db.execute('SELECT count(*) FROM eat_receipts').fetchone()[0], 1)
+            self.assertEqual(db.execute('SELECT count(*) FROM review_receipts').fetchone()[0], 1)
+            publish_candidates(db, cards, publish, sample_nonmatches=True)
+            self.assertTrue(delivered[-1]['review'])
+            self.assertNotEqual(delivered[-1]['procedure'], delivered[-2]['procedure'])
+        finally:
+            db.close()
+
     def test_rts_uses_only_positions_of_the_current_lot(self):
         from agent.eat_import import connection, ingest, publish_candidates
         title = 'Оказание услуг по договору'

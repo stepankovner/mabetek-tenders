@@ -388,6 +388,10 @@ test('Mac reports a real source scan independently of matching lots and preserve
   assert.equal(db.prepare("SELECT last_error FROM sources WHERE id='mac/eis-price_requests'").get().last_error,null);
   assert.equal((await post('eis-candidate',{...eisCard,procedure:'0332200065926000081'})).status,400);
   assert.deepEqual(await (await post('eis-candidate',eisCard)).json(),{status:'filtered'});
+  db.exec("INSERT INTO owner(id) VALUES('1')");
+  assert.deepEqual(await (await post('eis-candidate',{...eisCard,review:true})).json(),{status:'filtered'});
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM notices WHERE url=?').get(eisCard.url).n,1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n,0);
   const order223={url:'https://zakupki.gov.ru/223/purchase/public/purchase/info/common-info.html?regNumber=32616574907',procedure:'32616574907',title:'Поставка медицинских изделий'};
   assert.deepEqual(await (await post('eis-candidate',order223)).json(),{status:'filtered'});
   assert.equal((await post('eis-candidate',{...order223,procedure:'32616574908'})).status,400);

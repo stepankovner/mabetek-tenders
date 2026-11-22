@@ -465,9 +465,9 @@ async function telegram(req:Request,e:Env){
 type Background = {waitUntil(task:Promise<unknown>):void};
 async function agent(req:Request,e:Env,path:string,ctx?:Background) {
   if(!await same(req.headers.get('Authorization'),'Bearer '+(e.AGENT_KEY||''))||!e.AGENT_KEY)return response({},403);
-  if(path==='/agent/check'){
-    const admitted=await pollAll(e);
-    await deliver(e);
+  if(path==='/agent/check'||path==='/agent/status'){
+    const admitted=path==='/agent/check'?await pollAll(e):false;
+    if(path==='/agent/check')await deliver(e);
     const {results}=await sql(e,'SELECT id,last_ok,last_error,cursor,next_at FROM sources ORDER BY id').all();
     return response({sources:results,admitted,delivery:await deliveryStats(e)});
   }
@@ -575,7 +575,9 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const match=typeof url==='string' && original.exec(url);
     if(!match||typeof procedure!=='string'||!(eis?/^(?:\d{11}|\d{19})$/:eat?/^\d{18}$/:/^\d{1,16}$/).test(procedure)
        ||(eis&&(match[1]||match[2])!==procedure)||((regional||rts)&&match[1]!==procedure)||typeof title!=='string'||!title.trim()||title.length>4000)return response({},400);
-    if(!catalogueMatch(title))return response({status:'filtered'});
+    const review=eis&&body.review===true;
+    const matched=!review&&catalogueMatch(title);
+    if(!matched&&!review)return response({status:'filtered'});
     if(!await sql(e,'SELECT id FROM owner LIMIT 1').first())return response({},503);
     let published:string|null=null;
     if(path==='/agent/comita-candidate' && body.published!=null){
@@ -585,10 +587,10 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
       if(!Number.isFinite(stamp)||stamp<=0||stamp>Date.now()||new Date(stamp).toISOString()!==value)return response({},400);
       published=value;
     }
-    const {statements,notifications}=noticeStatements(e,eis?(match[2]?'eis-price_requests':'eis-orders'):regional?'otc-khab':eat?'eat':rts?'rts-rzd-search':'comita-rzd',[{title,url,published}]);
+    const {statements,notifications}=noticeStatements(e,eis?(match[2]?'eis-price_requests':'eis-orders'):regional?'otc-khab':eat?'eat':rts?'rts-rzd-search':'comita-rzd',[{title,url,published}],!review);
     const results=await e.DB.batch(statements);
     if(notifications.some(i=>results[i].meta.changes>0))await dispatchQueued(e,ctx);
-    return response({status:'accepted'});
+    return response({status:matched?'accepted':'filtered'});
   }
   if(path==='/agent/catalogue'){
     if(!Object.hasOwn(publicCatalogues,body.source)||typeof body.html!=='string'||body.html.length>3000000)return response({},400);

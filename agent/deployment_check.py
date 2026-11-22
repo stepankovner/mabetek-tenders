@@ -23,7 +23,7 @@ def live_release():
 
 def source_status():
     try:
-        return request(settings(), 'check', {}), 'Проверка через Mac'
+        return request(settings(), 'status', {}), 'Проверка через Mac'
     except (OSError, ValueError) as err:
         print('Проверка агента:', getattr(err, 'code', None) or type(err).__name__, flush=True)
     result = subprocess.run(

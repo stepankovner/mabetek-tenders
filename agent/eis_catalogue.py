@@ -124,7 +124,7 @@ def collect(registry, path, publish=None):
         db.execute("CREATE TABLE IF NOT EXISTS eis_cursor(registry TEXT PRIMARY KEY, next_page INTEGER NOT NULL)")
         result = ingest(db, cards)
         if publish is not None:
-            publish_candidates(db, cards, publish)
+            publish_candidates(db, cards, publish, sample_nonmatches=True)
         cursor = db.execute("SELECT next_page FROM eis_cursor WHERE registry=?", (registry,)).fetchone()
         number = cursor[0] if cursor else 2
         next_page = 2
@@ -143,7 +143,7 @@ def collect(registry, path, publish=None):
                 return result
             second = ingest(db, extra)
             if publish is not None:
-                publish_candidates(db, extra, publish)
+                publish_candidates(db, extra, publish, sample_nonmatches=True)
             result["unique"] = len({card["procedure"] for card in cards + extra})
             result["inserted"] += second["inserted"]
             result["differences"].extend(second["differences"])
