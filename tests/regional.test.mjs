@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {activeCount} from '../tools/otc_region.mjs';
-import {readRzdPage} from '../tools/rts_catalogue.mjs';
+import {readRzdPage,scan} from '../tools/rts_catalogue.mjs';
 import {runInNewContext} from 'node:vm';
 
 test('Региональный OTC требует явно указанное число актуальных закупок',()=>{
@@ -21,6 +21,22 @@ test('Последняя страница РТС сверяется с полн�
   assert.equal(read(142,15,2).count,142);
   assert.throws(()=>read(142,15,1),/Неполная/);
   assert.throws(()=>read(142,2,9),/Неполная/);
+});
+
+test('РТС сохраняет проверенные карточки, когда вторая страница перестаёт отвечать',async()=>{
+  const card={url:'https://223.rts-tender.ru/supplier/auction/Trade/View.aspx?Id=123#1'};
+  let pages=0;
+  const page={
+    goto:async()=>({status:()=>200}),
+    getByPlaceholder:()=>({fill:async()=>{}}),
+    locator:()=>({click:async()=>{},first:()=>({click:async()=>{}})}),
+    waitForResponse:async()=>({ok:()=>++pages===1,status:()=>503,text:async()=>''}),
+    evaluate:async()=>({count:11,cards:[card]}),
+    waitForFunction:async()=>{},
+    url:()=> 'https://www.rts-tender.ru/poisk/?id=fixture'
+  };
+  assert.deepEqual(await scan(page,{allowPartial:true}),
+    {cards:[card],pages:1,totalPages:2,reason:'rts_pagination_incomplete'});
 });
 
 test('РТС хранит позицию конкретного лота и отличает ноль витрины от цены',()=>{

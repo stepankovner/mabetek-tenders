@@ -370,7 +370,7 @@ async function telegram(req:Request,e:Env){
       const job=await sql(e,'SELECT state FROM jobs WHERE lot=? AND revision=? AND op=?',id,v,'pdf/'+digest).first();
       if(job?.state==='done'){reply='КП с этими условиями уже отправлено в чат.';break;}
       if(job?.state==='uncertain'){reply='Подтверждение доставки PDF не получено. Проверьте историю чата.';break;}
-      mutations.push(sql(e,"INSERT INTO jobs(lot,revision,op,input) VALUES(?,?,?,?) ON CONFLICT(lot,revision,op) DO UPDATE SET state='queued',attempts=0,until_ts=0,lease=NULL WHERE jobs.state='failed'",id,v,'pdf/'+digest,JSON.stringify(details.data)));
+      mutations.push(sql(e,"INSERT INTO jobs(lot,revision,op,input) VALUES(?,?,?,?) ON CONFLICT(lot,revision,op) DO UPDATE SET state='queued',attempts=0,until_ts=0,lease=NULL WHERE jobs.state='failed' OR (jobs.state='running' AND jobs.until_ts<unixepoch() AND jobs.attempts>=4)",id,v,'pdf/'+digest,JSON.stringify(details.data)));
       reply='Подтверждение принято. PDF в очереди Mac.';break;
     }
     case '/analyze':{
@@ -384,7 +384,7 @@ async function telegram(req:Request,e:Env){
       }
       if(job?.state==='running' && job.until_ts>=now()){reply='Mac обрабатывает документы.';break;}
       const agent=await sql(e,'SELECT seen,paused FROM agent_state WHERE id=1').first();
-      mutations.push(sql(e,"INSERT INTO jobs(lot,revision,op) VALUES(?,?,'analysis') ON CONFLICT(lot,revision,op) DO UPDATE SET state='queued',attempts=0 WHERE jobs.state='running' AND jobs.until_ts<unixepoch() AND jobs.attempts>=4",lot,rev));
+      mutations.push(sql(e,"INSERT INTO jobs(lot,revision,op) VALUES(?,?,'analysis') ON CONFLICT(lot,revision,op) DO UPDATE SET state='queued',attempts=0,until_ts=0,lease=NULL WHERE jobs.state='failed' OR (jobs.state='running' AND jobs.until_ts<unixepoch() AND jobs.attempts>=4)",lot,rev));
       if(agent?.paused)reply='Разбор в очереди. Mac на паузе. Возобновить: /resume';
       else if(!agent?.seen || agent.seen<now()-180)reply='Разбор ожидает подключения Mac.';
       else reply='Разбор поставлен в очередь на Mac.';
@@ -401,12 +401,13 @@ async function telegram(req:Request,e:Env){
       const labels:Record<string,string>={'eis-orders':'ЕИС · закупки','eis-price_requests':'ЕИС · запросы цен','watch/rzd':'РЖД · отслеживаемые оригиналы',eat:'ЕАТ Берёзка','otc-khab':'OTC · Хабаровский край','comita-rzd':'КОМИТА РЖД','rts-rzd-search':'РТС · РЖД',eis:'ЕИС',b2b:'B2B-Center',...Object.fromEntries(Object.entries(publicCatalogues).map(([id,c])=>[id,c.name]))};
       const sourceStatus=sources.map(s=>(s.id.startsWith('mac/')?'Mac · '+(labels[s.id.slice(4)]||s.id.slice(4)):(labels[s.id]||s.id))+': '+(s.last_error||(s.last_ok?'проверено '+new Date(s.last_ok*1000).toISOString():'проверки ещё не было'))).join('\n');
       const a=await sql(e,'SELECT * FROM agent_state WHERE id=1').first();
-      const count=await sql(e,"SELECT count(*) AS n,min(created) AS oldest FROM jobs WHERE state IN ('queued','running')").first();
+      const count=await sql(e,"SELECT count(*) AS n,min(j.created) AS oldest FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE j.state IN ('queued','running') AND (j.state='queued' OR j.until_ts>=unixepoch() OR j.attempts<4)").first();
+      const failures=await sql(e,"SELECT count(*) AS n FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE j.state IN ('failed','uncertain') OR (j.state='running' AND j.until_ts<unixepoch() AND j.attempts>=4)").first();
       const cards=await sql(e,'SELECT count(*) AS n FROM pending_cards').first();
       const usage=await sql(e,"SELECT total,background FROM scan_usage WHERE day=date('now')").first();
       const budget=scanBudget(e);
       const sample=await deliveryStats(e);
-      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nКарточек ожидают Mac: '+cards?.n+'\nВозраст старейшей задачи разбора или КП, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(sample?.publication_p95_seconds!=null?Math.ceil(sample.publication_p95_seconds/60)+' мин':'нет данных')+'\nОчередь → Telegram: '+(sample?.queued||0)+' наблюдений, P95: '+(sample?.queue_p95_seconds!=null?sample.queue_p95_seconds+' с':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';break;
+      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nСбой или неподтверждённая доставка: '+(failures?.n||0)+'\nКарточек ожидают Mac: '+cards?.n+'\nВозраст старейшей задачи разбора или КП, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(sample?.publication_p95_seconds!=null?Math.ceil(sample.publication_p95_seconds/60)+' мин':'нет данных')+'\nОчередь → Telegram: '+(sample?.queued||0)+' наблюдений, P95: '+(sample?.queue_p95_seconds!=null?sample.queue_p95_seconds+' с':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';break;
     }
     case '/semantic':{
       if(!e.AI){reply='Бесплатная модель поиска пока не подключена.';break;}
@@ -502,7 +503,7 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     try{approved=offer(card,Object.fromEntries(answers.results.map(r=>[r.field,r.value])));}
     catch{return response({},409);}
     if(job.op!=='pdf/'+await hash(JSON.stringify(approved.data)))return response({},409);
-    const locked=await sql(e,"UPDATE jobs SET state='uncertain' WHERE id=? AND state='running' AND lease=? RETURNING id",id,lease).first();
+    const locked=await sql(e,"UPDATE jobs SET state='uncertain' WHERE id=? AND state='running' AND lease=? AND until_ts>=unixepoch() AND EXISTS(SELECT 1 FROM lots WHERE lots.id=jobs.lot AND lots.revision=jobs.revision) AND NOT EXISTS(SELECT 1 FROM decisions WHERE decisions.lot=jobs.lot AND decisions.revision=jobs.revision) RETURNING id",id,lease).first();
     if(!locked)return response({},409);
     const form=new FormData();form.set('chat_id',job.owner);form.set('document',blob,'KP.pdf');form.set('caption','Предложение для проверки и ручной подачи.');
     const sent=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendDocument',{method:'POST',body:form});
@@ -551,9 +552,12 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
       eis_pagination_unavailable:'ЕИС не отдала подтверждённую следующую страницу',
       eis_unrecognized_rows:'Часть строк ЕИС не распознана',
     };
-    const partial=!body.ok && body.partial===true && id.startsWith('eis-')
-      && typeof body.reason==='string' && Object.hasOwn(eisReasons,body.reason);
-    const error=partial?'Частичный обход. '+eisReasons[body.reason]:
+    const partial=!body.ok && body.partial===true && typeof body.reason==='string';
+    const partialReason=partial&&(
+      id.startsWith('eis-') && Object.hasOwn(eisReasons,body.reason)?eisReasons[body.reason]:
+      id==='rts-rzd-search' && body.reason==='rts_pagination_incomplete'?'РТС не отдала продолжение выдачи':null
+    );
+    const error=partialReason?'Частичный обход. '+partialReason:
       id==='rts-rzd-search' && body.reason==='rts_public_search_unavailable'
         ? 'РТС вернула HTTP 503 и страницу Anti-DDoS' : 'Ошибка обхода на Mac';
     await sql(e,'INSERT INTO sources(id,url,last_ok,last_error) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_ok=coalesce(excluded.last_ok,sources.last_ok),last_error=excluded.last_error',
@@ -601,7 +605,7 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     return response({...state,pendingCard:Boolean(pending),failedCatalogues:failed.results.map(r=>r.id),rosneftPage:Number(failed.results.find(r=>r.id==='rosneft')?.cursor)||1});
   }
   if(path==='/agent/claim'){
-    const job=await sql(e,"UPDATE jobs SET state='running',lease=?,until_ts=unixepoch()+300,attempts=attempts+1 WHERE id=(SELECT j.id FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE ((j.state='queued' AND j.until_ts<=unixepoch()) OR (j.state='running' AND j.until_ts<unixepoch())) AND (j.op NOT LIKE 'pdf/%' OR NOT EXISTS(SELECT 1 FROM telegram_cooldown WHERE until_ts>unixepoch())) AND j.attempts<4 AND (SELECT paused FROM agent_state WHERE id=1)=0 ORDER BY j.created LIMIT 1) RETURNING *",crypto.randomUUID()).first();
+    const job=await sql(e,"UPDATE jobs SET state='running',lease=?,until_ts=unixepoch()+300,attempts=attempts+1 WHERE id=(SELECT j.id FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE ((j.state='queued' AND j.until_ts<=unixepoch()) OR (j.state='running' AND j.until_ts<unixepoch())) AND (j.op NOT LIKE 'pdf/%' OR (NOT EXISTS(SELECT 1 FROM telegram_cooldown WHERE until_ts>unixepoch()) AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.lot=j.lot AND d.revision=j.revision))) AND j.attempts<4 AND (SELECT paused FROM agent_state WHERE id=1)=0 ORDER BY j.created LIMIT 1) RETURNING *",crypto.randomUUID()).first();
     if(!job)return response(null);
     const version=await sql(e,'SELECT payload FROM versions WHERE lot=? AND revision=?',job.lot,job.revision).first();
     return response({...job,card:JSON.parse(version!.payload)});

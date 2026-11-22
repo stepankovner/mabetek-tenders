@@ -35,7 +35,8 @@ export function readRzdPage({html, number}) {
   return {count:Number(count), cards:[...cards.values()]};
 }
 
-export async function scan(page) {
+export async function scan(page, {allowPartial=false, limitMs=100000}={}) {
+  const started=performance.now();
   const landing = await page.goto('https://www.rts-tender.ru/poisk/', {waitUntil:'domcontentloaded',timeout:30000});
   try {
     await page.getByPlaceholder('Введите ключевое слово или номер извещения').fill('РЖД',{timeout:30000});
@@ -57,30 +58,45 @@ export async function scan(page) {
   };
   const first = await read(response, 1);
   const cards = new Map(first.cards.map(card => [card.url, card]));
+  let pages=1;
+  let reason=null;
   for (let number = 2; number <= Math.ceil(first.count / 10); number++) {
-    await page.waitForFunction(previous =>
-      Array.from(document.querySelectorAll('#pager .current')).some(el => el.textContent.trim() === String(previous)),
-      number - 1, {timeout:15000});
-    const id = new URL(page.url()).searchParams.get('id');
-    const [next] = await Promise.all([
-      page.waitForResponse(r => {
-        if (r.url() !== 'https://www.rts-tender.ru/poisk/Search/LoadPage' || r.request().method() !== 'POST') return false;
-        const request = r.request().postDataJSON();
-        return request?.page === number && request.id === id;
-      }, {timeout:20000}),
-      page.locator('#pager a[href="?page=' + number + '"]').first().click({timeout:15000})
-    ]);
-    const batch = await read(next, number);
-    if (batch.count !== first.count) throw Error('Состав выдачи РТС изменился во время обхода');
-    for (const card of batch.cards) cards.set(card.url, card);
+    const available=Math.min(15000,Math.floor(limitMs-(performance.now()-started)));
+    if(allowPartial&&available<=0){
+      reason='rts_pagination_incomplete';
+      break;
+    }
+    const timeout=allowPartial?available:15000;
+    try{
+      await page.waitForFunction(previous =>
+        Array.from(document.querySelectorAll('#pager .current')).some(el => el.textContent.trim() === String(previous)),
+        number - 1, {timeout});
+      const id = new URL(page.url()).searchParams.get('id');
+      const [next] = await Promise.all([
+        page.waitForResponse(r => {
+          if (r.url() !== 'https://www.rts-tender.ru/poisk/Search/LoadPage' || r.request().method() !== 'POST') return false;
+          const request = r.request().postDataJSON();
+          return request?.page === number && request.id === id;
+        }, {timeout}),
+        page.locator('#pager a[href="?page=' + number + '"]').first().click({timeout})
+      ]);
+      const batch = await read(next, number);
+      if (batch.count !== first.count) throw Error('Состав выдачи РТС изменился во время обхода');
+      for (const card of batch.cards) cards.set(card.url, card);
+      pages=number;
+    }catch(error){
+      if(!allowPartial)throw error;
+      reason='rts_pagination_incomplete';
+      break;
+    }
   }
-  return [...cards.values()];
+  return allowPartial?{cards:[...cards.values()],pages,totalPages:Math.max(1,Math.ceil(first.count/10)),reason}:[...cards.values()];
 }
 
 if (process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
   const require=createRequire(import.meta.url);
   const {chromium}=require(require.resolve('playwright-core',{paths:[process.cwd(),new URL('../../frontend/',import.meta.url).pathname]}));
   const browser=await chromium.launch({channel:'chrome'});
-  try { console.log(JSON.stringify(await scan(await browser.newPage()))); }
+  try { console.log(JSON.stringify(await scan(await browser.newPage(), {allowPartial:process.argv.includes('--partial')}))); }
   finally { await browser.close(); }
 }

@@ -70,16 +70,39 @@ def publish_candidates(db, cards, publish):
             break
 
 
-def collect_browser(node, modules, path, script, parse, publish):
+def collect_browser(node, modules, path, script, parse, publish, *, args=('5',)):
     collector = Path(__file__).resolve().parents[1] / 'tools' / script
-    run = subprocess.run([node, str(collector), '5'], cwd=modules, capture_output=True,
+    run = subprocess.run([node, str(collector), *args], cwd=modules, capture_output=True,
                          text=True, timeout=150, check=True)
-    cards = parse(json.loads(run.stdout))
+    snapshot = json.loads(run.stdout)
+    cards = parse(snapshot)
     with closing(connection(path)) as db:
         result = ingest(db, cards)
         if publish is not None:
             publish_candidates(db, cards, publish)
         return result
+
+
+def collect_rts(node, modules, path, publish=None):
+    def checked(snapshot):
+        nonlocal reason
+        if not isinstance(snapshot, dict):
+            raise ValueError('РТС не отдала результат обхода')
+        pages = snapshot.get('pages')
+        total = snapshot.get('totalPages')
+        cards = snapshot.get('cards')
+        reason = snapshot.get('reason')
+        if (type(pages) is not int or type(total) is not int or not 1 <= pages <= total
+                or not isinstance(cards, list)
+                or reason != ('rts_pagination_incomplete' if pages < total else None)):
+            raise ValueError('РТС не подтвердила объём обхода')
+        return cards
+
+    reason = None
+    result = collect_browser(node, modules, path, 'rts_catalogue.mjs', checked, publish, args=('--partial',))
+    if reason:
+        result['reason'] = reason
+    return result
 
 
 def collect_local(node, modules, path, publish=None):

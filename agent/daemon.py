@@ -137,9 +137,9 @@ def schedule_catalogues(conf):
         start_collector(conf, 'eat', 'ЕАТ', lambda: eat_import.collect_local(
             conf['eat_node'], conf['eat_modules'], CONFIG.parent / 'eat-inbox.sqlite',
             lambda card: request(conf, 'eat-candidate', card)))
-        start_collector(conf, 'rts-rzd-search', 'РТС РЖД', lambda: eat_import.collect_browser(
+        start_collector(conf, 'rts-rzd-search', 'РТС РЖД', lambda: eat_import.collect_rts(
             conf['eat_node'], conf['eat_modules'], CONFIG.parent / 'rts-inbox.sqlite',
-            'rts_catalogue.mjs', list, lambda card: request(conf, 'rts-candidate', card)))
+            lambda card: request(conf, 'rts-candidate', card)))
         start_collector(conf, 'otc-khab', 'OTC Хабаровский край', lambda: eat_import.collect_browser(
             conf['eat_node'], conf['eat_modules'], CONFIG.parent / 'otc-khab-inbox.sqlite',
             'otc_region.mjs', list, lambda card: request(conf, 'otc-region-candidate', card)))
