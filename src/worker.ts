@@ -45,7 +45,7 @@ async function checkAgentHealth(e:Env){
     'mac-offline/'+agent.seen,JSON.stringify({text:'Mac не выходит на связь более 20 минут. Сбор с Mac и подготовка документов задержаны. Облачный поиск продолжает работу на доступных площадках. Проверьте, что Mac включён, подключён к сети и выполнен вход в macOS. Состояние: /status.'}),agent.seen).run();
 }
 async function deliveryStats(e:Env) {
-  // Один снимок D1 для обоих распределений, включая случаи без времени публикации.
+  // Keep historical imports separate from notices published inside the observation window.
   return sql(e,`WITH recent AS (
     SELECT sent,queued,published FROM delivery_observations WHERE sent>=unixepoch()-604800
   ), queue AS (
@@ -54,11 +54,22 @@ async function deliveryStats(e:Env) {
   ), full_delay AS (
     SELECT sent-published AS seconds, row_number() OVER (ORDER BY sent-published) AS pos,
            count(*) OVER () AS n FROM recent WHERE published<=sent
+  ), fresh_delay AS (
+    SELECT sent-published AS seconds, row_number() OVER (ORDER BY sent-published) AS pos,
+           count(*) OVER () AS n FROM recent WHERE published BETWEEN unixepoch()-604800 AND sent
   ) SELECT (SELECT count(*) FROM recent) AS total,
            (SELECT count(*) FROM full_delay) AS dated,
            (SELECT seconds FROM full_delay WHERE pos=(95*n+99)/100) AS publication_p95_seconds,
+           (SELECT count(*) FROM fresh_delay) AS recent_published,
+           (SELECT seconds FROM fresh_delay WHERE pos=(95*n+99)/100) AS recent_publication_p95_seconds,
+           (SELECT count(*) FROM fresh_delay WHERE seconds<=1800) AS recent_within_30m,
            (SELECT count(*) FROM queue) AS queued,
            (SELECT seconds FROM queue WHERE pos=(95*n+99)/100) AS queue_p95_seconds`).first();
+}
+async function documentQueueStats(e:Env){
+  return sql(e,`SELECT count(*) AS n,count(error) AS errors,
+    min(CASE WHEN checked IS NULL OR error IS NOT NULL THEN created END) AS oldest
+    FROM document_tasks WHERE checked IS NULL OR error IS NOT NULL OR due<=unixepoch()`).first();
 }
 async function hash(s:string) {
   return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s)))].map(b=>b.toString(16).padStart(2,'0')).join('');
@@ -574,15 +585,18 @@ async function telegram(req:Request,e:Env){
       const count=await sql(e,"SELECT count(*) AS n,min(j.created) AS oldest FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE j.state IN ('queued','running') AND (j.state='queued' OR j.until_ts>=unixepoch() OR j.attempts<4)").first();
       const failures=await sql(e,"SELECT count(*) AS n FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE j.state IN ('failed','uncertain') OR (j.state='running' AND j.until_ts<unixepoch() AND j.attempts>=4)").first();
       const cards=await sql(e,'SELECT count(*) AS n FROM pending_cards').first();
-      const documents=await sql(e,`SELECT count(*) AS n,sum(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS errors
-        FROM document_tasks WHERE (watched=1 OR created>=unixepoch()-172800) AND (checked IS NULL OR due<=unixepoch())`).first();
+      const documents=await documentQueueStats(e);
       const usage=await sql(e,"SELECT total,background FROM scan_usage WHERE day=date('now')").first();
       const budget=scanBudget(e);
       const sample=await deliveryStats(e);
       const deliveryErrors=await sql(e,"SELECT count(CASE WHEN state='failed' THEN 1 END) AS failed,count(CASE WHEN state='uncertain' THEN 1 END) AS uncertain FROM outbox WHERE created>=unixepoch()-604800 AND state IN ('failed','uncertain')").first();
       reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nСбой или неподтверждённая доставка: '+(failures?.n||0)+'\nСообщения за 7 дней: отказов Telegram '+(deliveryErrors?.failed||0)+', без подтверждения '+(deliveryErrors?.uncertain||0)+'\nКарточек ожидают Mac: '+cards?.n+'\nВозраст старейшей задачи разбора или КП, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(sample?.publication_p95_seconds!=null?Math.ceil(sample.publication_p95_seconds/60)+' мин':'нет данных')+'\nОчередь → Telegram: '+(sample?.queued||0)+' наблюдений, P95: '+(sample?.queue_p95_seconds!=null?sample.queue_p95_seconds+' с':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';
+      reply+='\nНовые публикации за 7 дней с точным временем: '+(sample?.recent_published||0)+
+        ', доставлено за 30 мин: '+(sample?.recent_within_30m||0)+
+        ', P95: '+(sample?.recent_publication_p95_seconds!=null?Math.ceil(sample.recent_publication_p95_seconds/60)+' мин':'нет данных');
       const local=await localHealth(e);
-      reply+='\nДокументы ожидают фоновой проверки: '+(documents?.n||0)+', с ошибкой: '+(documents?.errors||0);
+      reply+='\nДокументы ожидают фоновой проверки: '+(documents?.n||0)+', с ошибкой: '+(documents?.errors||0)+
+        ', самая давняя непроверенная задача: '+(documents?.oldest?Math.floor((now()-documents.oldest)/60)+' мин':'нет');
       if(local)reply+='\nВерсия Mac: '+local.release+'\nНаходок в локальной очереди: '+local.pending+', возраст старейшей, с: '+(local.oldest?Math.max(0,now()-local.oldest):0)+'\nБаз Mac с ошибкой чтения: '+local.unreadable+'\nПоследняя резервная копия: '+(local.backup_at?new Date(local.backup_at*1000).toISOString():'ещё не создана');
       break;
     }
@@ -663,7 +677,7 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const admitted=path==='/agent/check'?await pollAll(e):false;
     if(path==='/agent/check')await deliver(e);
     const {results}=await sql(e,'SELECT id,last_ok,last_error,cursor,next_at FROM sources ORDER BY id').all();
-    return response({sources:results,admitted,delivery:await deliveryStats(e),agent:await sql(e,'SELECT * FROM agent_state WHERE id=1').first(),local:await localHealth(e)});
+    return response({sources:results,admitted,delivery:await deliveryStats(e),agent:await sql(e,'SELECT * FROM agent_state WHERE id=1').first(),local:await localHealth(e),documents:await documentQueueStats(e)});
   }
   if(path==='/agent/pdf'){
     const id=req.headers.get('x-job'),lease=req.headers.get('x-lease');
@@ -787,12 +801,12 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
   const body=await req.json() as any;
   if(path==='/agent/document-claim'){
     await sql(e,`DELETE FROM document_tasks WHERE key IN (
-      SELECT key FROM document_tasks WHERE watched=0 AND created<unixepoch()-172800 AND until_ts<unixepoch()
+      SELECT key FROM document_tasks WHERE watched=0 AND checked<unixepoch()-172800 AND error IS NULL AND until_ts<unixepoch()
       ORDER BY created LIMIT 32)`).run();
     const task=await sql(e,`UPDATE document_tasks SET lease=?,until_ts=unixepoch()+240
       WHERE key=(SELECT key FROM document_tasks WHERE due<=unixepoch() AND until_ts<unixepoch()
-        AND (watched=1 OR created>=unixepoch()-172800) AND (SELECT paused FROM agent_state WHERE id=1)=0
-        ORDER BY (watched=?) DESC,CASE WHEN watched=1 THEN due ELSE -created END LIMIT 1) RETURNING key,url,lease,watched`,
+        AND (SELECT paused FROM agent_state WHERE id=1)=0
+        ORDER BY (watched=?) DESC, (checked IS NULL) DESC, due, created, key LIMIT 1) RETURNING key,url,lease,watched`,
       crypto.randomUUID(),body.discovery===true?0:1).first();
     return response(task??null);
   }
@@ -817,12 +831,13 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const tracked=Boolean(task.watched||previous||matched);
     if(tracked)await saveCard(e,card,previous?.revision,review,false);
     const statements=[sql(e,`UPDATE document_tasks SET lease=NULL,until_ts=0,checked=unixepoch(),due=unixepoch()+?,
-      watched=max(watched,?),error=? WHERE key=? AND lease=?`,tracked?(review.complete?(acceptingCard(card)?3600:86400):1800):86400,Number(tracked),
+      watched=max(watched,?),error=? WHERE key=? AND lease=?`,review.complete?(tracked&&acceptingCard(card)?3600:604800):1800,Number(tracked),
       review.complete?null:'Не все приложения получены',task.key,task.lease)];
     if(matched&&card.source==='eis-order'){
       const message='ЕИС · закупка найдена по приложению\n'+card.title.slice(0,420)+'\n'+matched.location+
         (matched.service?'\n'+matched.service.file+', '+matched.service.location+': '+matched.service.quote:'')+'\n'+card.url;
-      const {statements:notice}=noticeStatements(e,'eis-orders',[{title:card.title,url:card.url}],false);
+      const original=await sql(e,'SELECT published FROM notices WHERE url=?',task.url).first();
+      const {statements:notice}=noticeStatements(e,'eis-orders',[{title:card.title,url:card.url,published:original?.published}],false);
       statements.push(...notice,queueEisNotice(e,card.url,JSON.stringify({text:message,location:matched.location})));
     }
     await e.DB.batch(statements);
@@ -886,9 +901,11 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const id=body?.source as keyof typeof localSources;
     if(!Object.hasOwn(localSources,id)||typeof body.ok!=='boolean')return response({},400);
     const eisReasons:Record<string,string>={
+      eis_first_page_unavailable:'Общая выдача ЕИС недоступна, выполнена попытка профильного поиска',
       eis_pagination_404:'ЕИС вернула HTTP 404 на продолжении',
       eis_pagination_unavailable:'ЕИС не отдала подтверждённую следующую страницу',
       eis_unrecognized_rows:'Часть строк ЕИС не распознана',
+      eis_pagination_gaps:'ЕИС: часть страниц ожидает повторной проверки',
       eis_search_incomplete:'ЕИС не подтвердила часть профильных запросов',
     };
     const partial=!body.ok && body.partial===true && typeof body.reason==='string';

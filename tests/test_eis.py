@@ -128,6 +128,8 @@ class EIS(unittest.TestCase):
                 result = collect('price_requests', path)
                 self.assertEqual(result['inserted'], 1)
                 self.assertEqual(result['reason'], 'eis_pagination_404')
+            with sqlite3.connect(path) as db:
+                db.execute("UPDATE eis_page_gaps SET due=0")
             throttled = HTTPError('https://zakupki.gov.ru/', 429, 'Too Many Requests', {'Retry-After':'1800'}, None)
             with patch('agent.eis_catalogue.read_page', side_effect=[first, throttled]):
                 result = collect('price_requests', path)
@@ -161,3 +163,39 @@ class EIS(unittest.TestCase):
         for path in ('/223/purchase/public/purchase/info/common-info.html',
                      '/epz/order/notice/notice223/common-info.html'):
             self.assertEqual(original_number('https://zakupki.gov.ru' + path + '?regNumber=' + number, 'orders'), number)
+
+
+    def test_general_listing_checks_both_fresh_pages_and_recovers_missing_deeper_page(self):
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from agent.eis_catalogue import collect
+        def page(n):
+            return (f'<input id="pageNumber" value="{n}"><a data-pagenumber="2"></a>'
+                    '<a data-pagenumber="4"></a><p class="noRecords">Поиск не дал результатов</p>')
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'inbox.sqlite'
+            with patch('agent.eis_catalogue.read_page', side_effect=[page(1), page(2), OSError()]):
+                self.assertEqual(collect('orders', path)['reason'], 'eis_pagination_unavailable')
+            with patch('agent.eis_catalogue.read_page', side_effect=[page(1), page(2), page(4)]) as read:
+                self.assertEqual(collect('orders', path)['reason'], 'eis_pagination_gaps')
+                self.assertEqual([call.args for call in read.call_args_list], [('orders',), ('orders', 2), ('orders', 4)])
+            with sqlite3.connect(path) as db:
+                db.execute('UPDATE eis_page_gaps SET due=0')
+            with patch('agent.eis_catalogue.read_page', side_effect=[page(1), page(2), page(3)]) as read:
+                self.assertNotIn('reason', collect('orders', path))
+                self.assertEqual(read.call_args.args, ('orders', 3))
+
+    def test_failed_general_listing_still_runs_profile_search(self):
+        from pathlib import Path
+        from unittest.mock import patch
+        from agent.eis_catalogue import collect
+        path = Path('fixture.sqlite')
+        with patch('agent.eis_catalogue.read_page', side_effect=OSError()), \
+                patch('agent.eis_catalogue.collect_search', return_value=dict(unique=3, inserted=2, differences=[])) as search:
+            result = collect('orders', path, targeted=True)
+        search.assert_called_once_with('orders', path, None)
+        self.assertEqual(result['search_unique'], 3)
+        self.assertEqual(result['inserted'], 2)
+        self.assertEqual(result['reason'], 'eis_first_page_unavailable')

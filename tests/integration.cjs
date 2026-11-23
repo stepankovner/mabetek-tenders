@@ -269,9 +269,12 @@ test('Publish smoke reports its revision and permits live polling only to the Ma
    const now=Math.floor(Date.now()/1000);
    const add=db.prepare('INSERT INTO delivery_observations VALUES(?,?,?,?,?)');
    for(let i=1;i<=20;i++)add.run(i,'catalogue',now-i,now,i===20?null:now-2*i);
+   add.run(21,'catalogue',now-15,now,now-700000);
+   add.run(22,'catalogue',now-15,now,now-1820);
    const res=await check(env.AGENT_KEY);
    const status=await res.json();
-   assert.deepEqual(status.delivery,{total:20,dated:19,publication_p95_seconds:38,queued:20,queue_p95_seconds:19});
+   assert.deepEqual(status.delivery,{total:22,dated:21,publication_p95_seconds:1820,
+     recent_published:20,recent_publication_p95_seconds:38,recent_within_30m:19,queued:22,queue_p95_seconds:19});
    assert.equal(status.sources.length,13);
    assert.ok(status.sources.some(s=>s.id==='rosneft'));
    assert.ok(status.sources.some(s=>s.id==='tektorgRzd'));
@@ -828,4 +831,22 @@ test('Фоновый документ находит общий заголово
     assert.match(sent.at(-1).text,/Срок:.*08.12.2099/);
     assert.equal(db.prepare('SELECT digest FROM document_reviews WHERE revision=3').get().digest,null);
   }finally{global.fetch=fetchBefore;db.close();}
+});
+
+
+test('Document queue retains old unchecked work and prefers it to newer or recurring discovery',async()=>{
+ const {db,env}=fixture();
+ try{
+   db.exec(`INSERT INTO document_tasks(key,url,watched,created,due,checked) VALUES
+     ('old','https://example.test/old',0,unixepoch()-200000,unixepoch()-200000,NULL),
+     ('fresh','https://example.test/fresh',0,unixepoch()-30,unixepoch()-30,NULL),
+     ('recurring','https://example.test/recurring',0,unixepoch()-6000,unixepoch()-5000,unixepoch()-6000),
+     ('prunable','https://example.test/prunable',0,unixepoch()-200000,0,unixepoch()-200000)`);
+   const claim=async()=>await (await worker.fetch(new Request('https://example.test/agent/document-claim',{
+     method:'POST',headers:{Authorization:'Bearer '+env.AGENT_KEY},body:JSON.stringify({discovery:true})
+   }),env)).json();
+   assert.equal((await claim()).key,'old');
+   assert.equal((await claim()).key,'fresh');
+   assert.equal(db.prepare("SELECT count(*) AS n FROM document_tasks WHERE key='prunable'").get().n,0);
+ }finally{db.close();}
 });

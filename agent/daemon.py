@@ -99,7 +99,7 @@ def schedule_documents(conf):
     global _document_thread, _document_due
     if time.monotonic() < _document_due or (_document_thread and _document_thread.is_alive()):
         return
-    _document_due = time.monotonic() + 240
+    _document_due = time.monotonic() + 120
     _document_thread = threading.Thread(target=inspect_background, args=(conf,), daemon=True)
     _document_thread.start()
 

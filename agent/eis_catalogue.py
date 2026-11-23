@@ -8,6 +8,7 @@ import threading
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
+from itertools import chain
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode, urljoin
@@ -189,45 +190,105 @@ def read_order(url):
     return page, target
 
 
-def collect(registry, path, publish=None, *, targeted=False):
-    first = read_page(registry)
+def advertised_pages(page):
+    return {int(number) for number in re.findall(r'data-pagenumber="(\d+)"', page)}
+
+
+def continuation_schema(db):
+    db.execute("""CREATE TABLE IF NOT EXISTS eis_page_gaps (
+        stream TEXT NOT NULL, page INTEGER NOT NULL, due INTEGER NOT NULL,
+        PRIMARY KEY(stream,page))""")
+
+
+def continuation(db, stream, cursor, first, *, start=2):
+    last = max(advertised_pages(first), default=1)
+    # The first page includes a link to the last page where EIS paginates.
+    with db:
+        db.execute("DELETE FROM eis_page_gaps WHERE stream=? AND page>?", (stream, last))
+    if last < start:
+        return None, last, False
+    cursor = cursor if start <= cursor <= last else start
+    retry = db.execute("""SELECT page FROM eis_page_gaps WHERE stream=? AND page>=?
+        AND due<=unixepoch() ORDER BY due,page LIMIT 1""", (stream, start)).fetchone()
+    if retry:
+        return retry[0], last, False
+    blocked = {row[0] for row in db.execute("SELECT page FROM eis_page_gaps WHERE stream=?", (stream,))}
+    for number in chain(range(cursor, last + 1), range(start, cursor)):
+        if number not in blocked:
+            return number, last, True
+    return None, last, False
+
+
+def record_page(db, stream, number, failed):
+    with db:
+        if failed:
+            db.execute("""INSERT INTO eis_page_gaps VALUES(?,?,unixepoch()+3600)
+                ON CONFLICT(stream,page) DO UPDATE SET due=excluded.due""", (stream, number))
+        else:
+            db.execute("DELETE FROM eis_page_gaps WHERE stream=? AND page=?", (stream, number))
+
+
+def fetch_continuation(registry, number, *, term=None):
+    page = read_page(registry, number) if term is None else read_page(registry, number, term=term)
+    if term is None:
+        marker = re.search(r'id="pageNumber"[^>]+value="(\d+)"', page)
+        if not marker or int(marker[1]) != number:
+            raise ValueError("ЕИС не подтвердила номер страницы")
     rejected = []
-    cards = parse(first, registry, rejected=rejected)
+    cards = parse(page, registry, rejected=rejected)
+    return cards, bool(rejected)
+
+
+def collect(registry, path, publish=None, *, targeted=False):
+    rejected = []
+    try:
+        first = read_page(registry)
+        cards = parse(first, registry, rejected=rejected)
+    except (OSError, ValueError) as error:
+        if not targeted or isinstance(error, HTTPError) and error.code == 429:
+            raise
+        result = dict(unique=0, inserted=0, differences=[], reason="eis_first_page_unavailable")
+        return finish_collection(registry, path, publish, result, targeted)
     with closing(connection(path)) as db:
+        continuation_schema(db)
         db.execute("CREATE TABLE IF NOT EXISTS eis_cursor(registry TEXT PRIMARY KEY, next_page INTEGER NOT NULL)")
         result = ingest(db, cards)
         if publish is not None:
             try_publish(db, cards, publish, result, sample_nonmatches=True)
         cursor = db.execute("SELECT next_page FROM eis_cursor WHERE registry=?", (registry,)).fetchone()
-        number = cursor[0] if cursor else 2
-        next_page = 2
-        rejected_extra = []
-        if 'data-pagenumber="2"' in first:
-            # Persist page one before fetching the continuation. Failed pages are retried next cycle.
+        position = cursor[0] if cursor else 3
+        number, last, advance = continuation(db, registry, position, first, start=3)
+        next_page = position if 3 <= position <= last else 3
+        pages = ([2] if last >= 2 else []) + ([number] if number is not None else [])
+        known = {card["procedure"] for card in cards}
+        for current in pages:
             try:
-                page = read_page(registry, number)
-                marker = re.search(r'id="pageNumber"[^>]+value="(\d+)"', page)
-                if not marker or int(marker[1]) != number:
-                    raise ValueError("ЕИС не подтвердила номер страницы")
-                extra = parse(page, registry, rejected=rejected_extra)
+                extra, partial = fetch_continuation(registry, current)
             except (OSError, ValueError) as error:
                 result["reason"] = ("eis_pagination_404" if isinstance(error, HTTPError)
                                     and error.code == 404 else "eis_pagination_unavailable")
                 if isinstance(error, HTTPError) and error.code == 429:
                     result["retry_after"] = retry_after(error.headers)
-                return finish_collection(registry, path, publish, result, targeted)
-            second = ingest(db, extra)
-            if publish is not None:
-                try_publish(db, extra, publish, result, sample_nonmatches=True)
-            result["unique"] = len({card["procedure"] for card in cards + extra})
-            result["inserted"] += second["inserted"]
-            result["differences"].extend(second["differences"])
-            if rejected_extra:
-                next_page = number
-            elif f'data-pagenumber="{number+1}"' in page:
-                next_page = number + 1
-        if rejected or rejected_extra:
-            result["reason"] = "eis_unrecognized_rows"
+                    break
+                partial = True
+            else:
+                fresh = [card for card in extra if card["procedure"] not in known]
+                known.update(card["procedure"] for card in fresh)
+                observed = ingest(db, fresh)
+                if publish is not None:
+                    try_publish(db, fresh, publish, result, sample_nonmatches=True)
+                result["inserted"] += observed["inserted"]
+                result["differences"].extend(observed["differences"])
+                if partial:
+                    result.setdefault("reason", "eis_unrecognized_rows")
+            record_page(db, registry, current, partial)
+            if current == number and (advance or current == next_page):
+                next_page = current + 1 if current < last else 3
+        result["unique"] = len(known)
+        if rejected:
+            result.setdefault("reason", "eis_unrecognized_rows")
+        if db.execute("SELECT 1 FROM eis_page_gaps WHERE stream=? LIMIT 1", (registry,)).fetchone():
+            result.setdefault("reason", "eis_pagination_gaps")
         with db:
             db.execute("INSERT OR REPLACE INTO eis_cursor VALUES(?,?)", (registry, next_page))
     return finish_collection(registry, path, publish, result, targeted)
@@ -246,28 +307,34 @@ def finish_collection(registry, path, publish, result, targeted):
 
 
 def collect_search(registry, path, publish=None, *, terms=None):
-    # Use a separate continuation for each query so a busy term cannot hide
-    # rarer procurements behind the first 50 results of another query.
+    # A failed continuation is retried separately from the forward cursor.
     if terms is None:
         terms = SEARCH_TERMS + (("7708503727",) if registry == "orders" else ())
     result = dict(unique=0, inserted=0, differences=[])
     cards = {}
     with closing(connection(path)) as db:
+        continuation_schema(db)
         db.execute("""CREATE TABLE IF NOT EXISTS eis_search_cursor(
             term TEXT PRIMARY KEY, next_page INTEGER NOT NULL)""")
         for term in terms:
             cursor_key = "publication:" + term
+            stream = registry + "/" + cursor_key
             row = db.execute("SELECT next_page FROM eis_search_cursor WHERE term=?", (cursor_key,)).fetchone()
-            number = row[0] if row else 2
-            for page_number in (1, number):
+            cursor = row[0] if row else 2
+            number = 1
+            while number is not None:
+                rejected = []
                 try:
-                    page = read_page(registry, page_number, term=term)
-                    rejected = []
+                    page = read_page(registry, number, term=term)
                     batch = parse(page, registry, rejected=rejected)
                 except (OSError, ValueError) as error:
                     result["reason"] = "eis_search_incomplete"
                     if isinstance(error, HTTPError) and error.code == 429:
                         result["retry_after"] = retry_after(error.headers)
+                    elif number > 1:
+                        record_page(db, stream, number, True)
+                        if advance or cursor == number:
+                            cursor = number + 1 if number < last else 2
                     break
                 new_cards = [card for card in batch if card["procedure"] not in cards]
                 cards.update((card["procedure"], card) for card in new_cards)
@@ -276,20 +343,19 @@ def collect_search(registry, path, publish=None, *, terms=None):
                 result["differences"].extend(observed["differences"])
                 if rejected:
                     result["reason"] = "eis_search_incomplete"
-                if page_number == 1 and number > 2 and f'data-pagenumber="{number}"' not in page:
-                    # The first page only exposes nearby pages and the last
-                    # page. Reset only if the total visibly shrank below us.
-                    advertised = [int(n) for n in re.findall(r'data-pagenumber="(\d+)"', page)]
-                    if max(advertised, default=1) < number:
-                        with db:
-                            db.execute("DELETE FROM eis_search_cursor WHERE term=?", (cursor_key,))
-                        break
-                if page_number == 1 and number == 2 and 'data-pagenumber="2"' not in page:
+                if number == 1:
+                    number, last, advance = continuation(db, stream, cursor, page)
+                    if cursor > last:
+                        cursor = 2
+                else:
+                    record_page(db, stream, number, bool(rejected))
+                    if advance or cursor == number:
+                        cursor = number + 1 if number < last else 2
                     break
-                if page_number == number and not rejected:
-                    following = number + 1 if f'data-pagenumber="{number+1}"' in page else 2
-                    with db:
-                        db.execute("INSERT OR REPLACE INTO eis_search_cursor VALUES(?,?)", (cursor_key, following))
+            with db:
+                db.execute("INSERT OR REPLACE INTO eis_search_cursor VALUES(?,?)", (cursor_key, cursor))
+            if db.execute("SELECT 1 FROM eis_page_gaps WHERE stream=? LIMIT 1", (stream,)).fetchone():
+                result.setdefault("reason", "eis_pagination_gaps")
             if "retry_after" in result:
                 break
         result["unique"] = len(cards)

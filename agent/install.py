@@ -178,7 +178,7 @@ def main():
     domain="gui/"+str(os.getuid())
     plist=Path.home()/"Library/LaunchAgents"/(LABEL+".plist")
     plist.parent.mkdir(parents=True,exist_ok=True)
-    data={"Label":LABEL,"ProgramArguments":[sys.executable,"-m","agent.daemon"],"WorkingDirectory":str(release),"RunAtLoad":True,"KeepAlive":True,"ThrottleInterval":45,
+    data={"Label":LABEL,"ProgramArguments":["/usr/bin/caffeinate","-s",sys.executable,"-m","agent.daemon"],"WorkingDirectory":str(release),"RunAtLoad":True,"KeepAlive":True,"ThrottleInterval":45,
           "EnvironmentVariables":{"TESSDATA_PREFIX":str(base/"tessdata")},"StandardErrorPath":str(base/"agent-error.log")}
     if plist.exists():
         old=plistlib.loads(plist.read_bytes())
