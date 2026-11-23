@@ -156,6 +156,26 @@ test('Registration accepts same-site form with opaque Origin but requires the ag
     assert.equal(await (await worker.fetch(make('https://other.invalid','cross-site'),env)).text(),'Недоступно');
   }finally{db.close();}
 });
+test('B2B scans every configured search in two polls and deduplicates shared cards',async()=>{
+ const {db,env}=fixture(),previous=global.fetch,terms=[];
+ const {b2b}=require(path.join(tmp,'monitor.js'));
+ global.fetch=async url=>{
+   const page=new URL(url);
+   assert.match(page.pathname,/market-search/);
+   terms.push(page.searchParams.get('q'));
+   return new Response('<a href="/market/service/tender-1234/">Карточка</a>'+
+     '<p class="panel-procedure__dscr-main">Погрузка вагонов в Хабаровске</p>');
+ };
+ try{
+   db.exec("INSERT INTO owner(id) VALUES('1')");
+   await b2b(env);
+   assert.equal(terms.length,3);
+   db.exec("UPDATE sources SET next_at=0");
+   await b2b(env);
+   assert.equal(new Set(terms).size,6);
+   assert.equal(db.prepare('SELECT count(*) AS n FROM outbox').get().n,1);
+ }finally{global.fetch=previous;db.close();}
+});
 test('B2B stores one notice from a tracked catalogue URL and honors Retry-After',async()=>{
   const {db,env}=fixture();
   db.exec("INSERT INTO owner(id) VALUES('1')");

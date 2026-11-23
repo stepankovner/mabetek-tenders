@@ -66,21 +66,35 @@ export async function b2b(e:any){
     const previous=Number(source.cursor);
     const index=Number.isInteger(previous)&&previous>=0&&previous<queries.length?previous:0;
     const search=new URL(catalog);
-    search.search=new URLSearchParams({q:queries[index],fz_type:'all',company_type:'2',include_firm_tree:'false',sort:'date_desc',trade:'buy',show:'actual'}).toString();
-    const rows=b2bIndex(await page(search.href));
+    const rows=new Map<string,ReturnType<typeof b2bIndex>[number]>();
     const batch=[];
-    let unread=0;
+    let unread=0, searchErrors=0, originalRequests=0;
     let limited:RateLimit|undefined;
-    for(const c of rows){
+    const termsPerScan=3;
+    for(let offset=0;offset<termsPerScan;offset++){
+      search.search=new URLSearchParams({q:queries[(index+offset)%queries.length],fz_type:'all',company_type:'2',include_firm_tree:'false',sort:'date_desc',trade:'buy',show:'actual'}).toString();
+      try{
+        for(const item of b2bIndex(await page(search.href))){
+          const earlier=rows.get(item.id);
+          rows.set(item.id,{...item,title:item.title||earlier?.title,published:item.published||earlier?.published});
+        }
+      }catch(error){
+        if(error instanceof RateLimit){limited=error;break;}
+        searchErrors++;
+      }
+    }
+    for(const c of rows.values()){
       // The actual title is obtained from the original, never reconstructed from a slug.
       const old=await q('SELECT title,published FROM notices WHERE url=?',c.url).first();
       if(old && (!c.title || old.title===c.title) && (!c.published || old.published===c.published))continue;
       let title=c.title||old?.title;
       if(!title){
+        if(limited||originalRequests>=12){unread++;continue;}
+        originalRequests++;
         try{title=b2bTitle(await page(c.url),c.id);}
         catch(err){
           unread++;
-          if(err instanceof RateLimit){limited=err;break;}
+          if(err instanceof RateLimit)limited=err;
           continue;
         }
       }
@@ -90,10 +104,12 @@ export async function b2b(e:any){
 
     }
     if(limited){
-      batch.push(q("UPDATE sources SET last_error=?,next_at=max(next_at,?) WHERE id='b2b'",'Частичный обход. HTTP 429 при чтении оригинала',limited.retryAt));
+      batch.push(q("UPDATE sources SET last_error=?,next_at=max(next_at,?) WHERE id='b2b'",'Частичный обход. HTTP 429 при проверке B2B-Center',limited.retryAt));
     }else{
-      const cursor=String((index+1)%queries.length);
-      batch.push(q("UPDATE sources SET last_ok=CASE WHEN ? IS NULL THEN unixepoch() ELSE last_ok END,cursor=?,last_error=? WHERE id='b2b'",unread||null,cursor,unread?'Частичный обход. Оригиналов не прочитано: '+unread:null));
+      const cursor=String((index+termsPerScan)%queries.length);
+      const issues=[searchErrors?'Запросов с ошибкой: '+searchErrors:'',unread?'Оригиналов не прочитано: '+unread:''].filter(Boolean);
+      batch.push(q("UPDATE sources SET last_ok=CASE WHEN ? IS NULL THEN unixepoch() ELSE last_ok END,cursor=?,last_error=? WHERE id='b2b'",
+        issues.length||null,cursor,issues.length?'Частичный обход. '+issues.join('. '):null));
     }
     await e.DB.batch(batch);
   }catch(err){
