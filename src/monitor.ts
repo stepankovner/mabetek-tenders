@@ -1,4 +1,33 @@
-import {b2bIndex,b2bTitle,rosneftPage,publicCatalogues,publicIndex,catalogueMatch,eisOrderNumber} from './core.mjs';
+import {b2bIndex,b2bTitle,rosneftPage,publicCatalogues,publicIndex,catalogueMatch,eisOrderNumber,khabarovskLocation} from './core.mjs';
+import {pendingCardUrl,readCard} from './card';
+
+export async function confirmLocation(row:{title:string,url:string}){
+  if(!catalogueMatch(row.title))return '';
+  if(pendingCardUrl(row.url)){
+    try{
+      const original=await readCard(row.url);
+      if(!catalogueMatch(original.title))return '';
+      if(original.place)return khabarovskLocation(original.title,original.place);
+    }catch{
+      // A verified locality in the title can still be used if the original is unavailable.
+    }
+  }
+  return khabarovskLocation(row.title);
+}
+
+async function localRows(rows:{title:string,url:string,published?:string|null}[]){
+  let remaining=2;
+  const candidates=[];
+  for(const row of rows){
+    if(remaining>0&&catalogueMatch(row.title)&&pendingCardUrl(row.url)){
+      remaining--;
+      candidates.push({...row,location:await confirmLocation(row)});
+    }else{
+      candidates.push(row);
+    }
+  }
+  return candidates;
+}
 const catalog='https://www.b2b-center.ru/app/next/market-search/';
 const queries=['погрузочно-разгрузочные','перевалка','железнодорожный тупик','ответственное хранение','постановка вагонов','путь необщего пользования'];
 class RateLimit extends Error {
@@ -56,7 +85,8 @@ export async function b2b(e:any){
         }
       }
       batch.push(q("INSERT INTO notices(url,title,description,published) VALUES(?,?,'B2B-Center · место и документы требуют проверки',?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,published=coalesce(excluded.published,notices.published),updated=max(unixepoch(),updated+1) WHERE title!=excluded.title OR (excluded.published IS NOT NULL AND notices.published IS NOT excluded.published)",c.url,title,c.published||null));
-      if(catalogueMatch(title))batch.push(q("INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner",'b2b/'+c.id,JSON.stringify({text:'Подборка B2B-Center · проверить место исполнения\n'+title+'\n'+c.url})));
+      const location=catalogueMatch(title)&&khabarovskLocation(title);
+      if(location)batch.push(q("INSERT INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner WHERE true ON CONFLICT(dedupe) DO UPDATE SET payload=excluded.payload,state='ready' WHERE outbox.state='suppressed'",'b2b/'+c.id,JSON.stringify({text:'B2B-Center · закупка в Хабаровске\n'+title+'\n'+location+'\n'+c.url,location})));
 
     }
     if(limited){
@@ -79,15 +109,16 @@ export function queueEisNotice(e:any,url:string,payload:string){
   const order=eisOrderNumber(url);
   const message=order?Object.assign(JSON.parse(payload),{reply_markup:{inline_keyboard:[[{text:'Открыть карточку ЕИС'}]]}}):null;
   const expanded=order?"json_set(?, '$.reply_markup.inline_keyboard[0][0].callback_data', '/notice ' || (SELECT rowid FROM notices WHERE url=?))":"?";
-  const query='INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,'+expanded+' FROM owner';
+  const query='INSERT INTO outbox(dedupe,owner,payload) SELECT ?,id,'+expanded+' FROM owner';
+  const upsert=" ON CONFLICT(dedupe) DO UPDATE SET payload=excluded.payload,state='ready' WHERE outbox.state='suppressed'";
   const args=order?[key,JSON.stringify(message),url]:[key,payload];
-  if(!match)return e.DB.prepare(query).bind(...args);
+  if(!match)return e.DB.prepare(query+' WHERE true'+upsert).bind(...args);
   const aliases=['epz/order/notice/notice223/common-info.html','epz/order/notice/notice223/view/common-info.html','223/purchase/public/purchase/info/common-info.html']
     .map(path=>'eis/https://zakupki.gov.ru/'+path+'?regNumber='+match[2]);
-  return e.DB.prepare(query+' WHERE NOT EXISTS(SELECT 1 FROM outbox WHERE dedupe IN (?,?,?))').bind(...args,...aliases);
+  return e.DB.prepare(query+" WHERE NOT EXISTS(SELECT 1 FROM outbox WHERE dedupe IN (?,?,?) AND state!='suppressed')"+upsert).bind(...args,...aliases);
 }
 
-export function noticeStatements(e:any,source:keyof typeof publicCatalogues | "eat" | "comita-rzd" | "rts-rzd-search" | "otc-khab" | "eis-orders" | "eis-price_requests",rows:{title:string,url:string,published?:string|null}[],notify=true){
+export function noticeStatements(e:any,source:keyof typeof publicCatalogues | "eat" | "comita-rzd" | "rts-rzd-search" | "otc-khab" | "eis-orders" | "eis-price_requests",rows:{title:string,url:string,published?:string|null,location?:string}[],notify=true){
   const catalogue=source==='eis-orders'?{name:'ЕИС · закупки'}:source==='eis-price_requests'?{name:'ЕИС · запросы цен'}:source==='otc-khab'?{name:'OTC · Хабаровский край'}:source==='eat'?{name:'ЕАТ Берёзка'}:source==='rts-rzd-search'?{name:'РТС · РЖД'}:source==='comita-rzd'?{name:'КОМИТА РЖД · Хабаровский край'}:publicCatalogues[source];
   const q=(s:string,...params:unknown[])=>e.DB.prepare(s).bind(...params);
     const statements=[];
@@ -95,14 +126,16 @@ export function noticeStatements(e:any,source:keyof typeof publicCatalogues | "e
     for(const row of rows){
       statements.push(q('INSERT INTO notices(url,title,description,published) VALUES(?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,published=coalesce(excluded.published,notices.published),updated=max(unixepoch(),updated+1) WHERE title!=excluded.title OR (excluded.published IS NOT NULL AND notices.published IS NOT excluded.published)',row.url,row.title,catalogue.name,row.published||null));
       if(!notify||!catalogueMatch(row.title))continue;
-      const message=catalogue.name+' · проверить место исполнения\n'+row.title.slice(0,600)+'\n'+row.url;
+      const location=row.location??khabarovskLocation(row.title);
+      if(!location)continue;
+      const message=catalogue.name+' · закупка в Хабаровске\n'+row.title.slice(0,600)+'\n'+location+'\n'+row.url;
       const lot=source==='roseltorg'?new URL(row.url).pathname.match(/^\/procedure\/([\w-]+\/\d+)$/)?.[1]:null;
       const payload=lot&&lot.length<=55?{text:message,reply_markup:{inline_keyboard:[[{text:'Открыть карточку',callback_data:'/ros '+lot}]]}}:{text:message};
       notifications.push(statements.length);
-      const serialized=JSON.stringify(payload);
+      const serialized=JSON.stringify({...payload,location});
       statements.push(source==='eis-orders'||source==='eis-price_requests'
         ?queueEisNotice(e,row.url,serialized)
-        :q('INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner',row.url,serialized));
+        :q("INSERT INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner WHERE true ON CONFLICT(dedupe) DO UPDATE SET payload=excluded.payload,state='ready' WHERE outbox.state='suppressed'",row.url,serialized));
     }
   return {statements,notifications};
 }
@@ -119,7 +152,7 @@ export async function macCatalogue(e:any,source:keyof typeof publicCatalogues,ht
     }
     catch{error='Не распознана публичная выдача на Mac';}
   }
-  const {statements,notifications}=noticeStatements(e,source,rows);
+  const {statements,notifications}=noticeStatements(e,source,await localRows(rows));
   statements.push(e.DB.prepare('INSERT INTO sources(id,url,last_ok,last_error,cursor) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_ok=coalesce(excluded.last_ok,sources.last_ok),last_error=excluded.last_error,cursor=coalesce(excluded.cursor,sources.cursor)').bind(id,catalogue.url,error?null:Math.floor(Date.now()/1000),error||null,cursor));
   const results=await e.DB.batch(statements);
   return {count:rows.length,error:error||null,queued:notifications.some(i=>results[i].meta.changes>0)};
@@ -140,7 +173,7 @@ export async function publicPoll(e:any,source:keyof typeof publicCatalogues){
     }):null;
     if(section && !body?.includes('proceduresResponse'))throw Error('Не распознана выгрузка ТЭК-Торг');
     const rows=result?result.rows:publicIndex(source,body??await page(catalogue.url));
-    const {statements}=noticeStatements(e,source,rows);
+    const {statements}=noticeStatements(e,source,await localRows(rows));
     statements.push(q('UPDATE sources SET last_ok=unixepoch(),last_error=NULL,cursor=? WHERE id=?',result?result.cursor:'Первая страница: '+rows.length,source));
     await e.DB.batch(statements);
   }catch(err){
