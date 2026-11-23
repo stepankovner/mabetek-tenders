@@ -1,0 +1,32 @@
+[
+  {
+    "database": "comita-inbox.sqlite",
+    "integrity": "ok",
+    "lots": 28,
+    "pending": 0
+  },
+  {
+    "database": "eat-inbox.sqlite",
+    "integrity": "ok",
+    "lots": 1260,
+    "pending": 0
+  },
+  {
+    "database": "eis-orders.sqlite",
+    "integrity": "ok",
+    "lots": 40,
+    "pending": 0
+  },
+  {
+    "database": "eis-price_requests.sqlite",
+    "integrity": "ok",
+    "lots": 96,
+    "pending": 1
+  },
+  {
+    "database": "otc-khab-inbox.sqlite",
+    "integrity": "ok",
+    "lots": 0,
+    "pending": 0
+  }
+]

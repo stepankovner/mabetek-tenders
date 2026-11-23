@@ -1,14 +1,16 @@
 """Read the two public EIS registries with a trust context restricted to the EIS host."""
 import html
+import http.cookiejar
 import re
 import ssl
 import urllib.request
+import threading
 from contextlib import closing
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urljoin
 
-from .eat_import import ingest, publish_candidates
+from .eat_import import ingest, try_publish
 from .local import connection
 from .sources import NoRedirect, retry_after
 
@@ -21,6 +23,20 @@ NOTICE = re.compile(r"https://zakupki\.gov\.ru/(?:(?:epz/order/notice/[a-z0-9]+/
 ACTIVE = {"подача заявок", "подача предложений", "подача заявок на участие"}
 BLOCK = re.compile(r'<div\s+class="search-registry-entry-block\b[^"]*">')
 LIMIT = 4_000_000
+_session = threading.local()
+# The public EIS frontend serves pagination to browser-compatible sessions.
+# Keep cookies in memory, separately for each collector thread, on this host only.
+BROWSER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
+
+
+def public_session():
+    if not hasattr(_session, 'opener'):
+        tls = ssl.create_default_context(cafile=str(Path(__file__).with_name('eis-root.pem')))
+        _session.opener = urllib.request.build_opener(
+            NoRedirect(), urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+            urllib.request.HTTPSHandler(context=tls))
+        _session.opener.addheaders = [('User-Agent', BROWSER_AGENT), ('Accept', 'text/html')]
+    return _session.opener
 
 
 def text(fragment):
@@ -80,8 +96,10 @@ def parse(page, registry, *, rejected=None):
 
 def read_html(url, procedure=None):
     # The trust context and any redirect stay on the EIS host.
-    tls = ssl.create_default_context(cafile=str(Path(__file__).with_name("eis-root.pem")))
-    opener = urllib.request.build_opener(NoRedirect(), urllib.request.HTTPSHandler(context=tls))
+    from urllib.parse import urlsplit
+    if urlsplit(url).scheme != 'https' or urlsplit(url).netloc != 'zakupki.gov.ru':
+        raise ValueError('Требуется официальный HTTPS-адрес ЕИС')
+    opener = public_session()
     try:
         response = opener.open(url, timeout=22)
     except HTTPError as error:
@@ -124,7 +142,7 @@ def collect(registry, path, publish=None):
         db.execute("CREATE TABLE IF NOT EXISTS eis_cursor(registry TEXT PRIMARY KEY, next_page INTEGER NOT NULL)")
         result = ingest(db, cards)
         if publish is not None:
-            publish_candidates(db, cards, publish, sample_nonmatches=True)
+            try_publish(db, cards, publish, result, sample_nonmatches=True)
         cursor = db.execute("SELECT next_page FROM eis_cursor WHERE registry=?", (registry,)).fetchone()
         number = cursor[0] if cursor else 2
         next_page = 2
@@ -145,7 +163,7 @@ def collect(registry, path, publish=None):
                 return result
             second = ingest(db, extra)
             if publish is not None:
-                publish_candidates(db, extra, publish, sample_nonmatches=True)
+                try_publish(db, extra, publish, result, sample_nonmatches=True)
             result["unique"] = len({card["procedure"] for card in cards + extra})
             result["inserted"] += second["inserted"]
             result["differences"].extend(second["differences"])

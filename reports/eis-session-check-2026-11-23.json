@@ -1,0 +1,12 @@
+{
+  "orders": {
+    "unique": 2,
+    "inserted": 2,
+    "differences": []
+  },
+  "price_requests": {
+    "unique": 11,
+    "inserted": 11,
+    "differences": []
+  }
+}

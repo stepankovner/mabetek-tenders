@@ -4,12 +4,41 @@ from unittest.mock import patch
 from agent.sources import fetch_catalogue, poll_fallback
 
 class SourceFallback(unittest.TestCase):
+    def test_local_delivery_health_and_replay_survive_another_broken_source(self):
+        import tempfile
+        from pathlib import Path
+        from agent import daemon
+        from agent.local import connection
+        from agent.eat_import import ingest
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            for name in ('eat-inbox.sqlite', 'comita-inbox.sqlite'):
+                db = connection(base / name)
+                try:
+                    ingest(db, [dict(source='eat', procedure=name, lot='1', title='Выгрузка вагонов', url=name)])
+                finally:
+                    db.close()
+            calls = []
+            def network(conf, endpoint, payload):
+                calls.append(endpoint)
+                if endpoint == 'eat-candidate':
+                    raise OSError('Network unavailable')
+                return {'status':'accepted'}
+            with (patch.object(daemon, 'CONFIG', base / 'agent.json'),
+                  patch.object(daemon, 'request', side_effect=network)):
+                self.assertEqual(daemon.local_health()['pending'], 2)
+                daemon.replay_publications({})
+                self.assertEqual(daemon.local_health()['pending'], 1)
+                self.assertEqual(daemon.local_health()['unreadable'], 0)
+            self.assertEqual(calls, ['eat-candidate', 'comita-candidate'])
+
     def test_local_catalogues_keep_running_when_worker_disappears_after_resume(self):
         from agent import daemon
         for state, expected in ((False, 1), (True, 0), (None, 0)):
             with (self.subTest(last_known_pause=state),
                     patch.object(daemon, '_collectors_paused', state),
                     patch.object(daemon, 'request', side_effect=OSError('Network down')),
+                    patch.object(daemon, 'schedule_maintenance'),
                     patch.object(daemon, 'schedule_catalogues') as schedule,
                     patch.object(daemon.shutil, 'disk_usage')):
                 with self.assertRaises(OSError):

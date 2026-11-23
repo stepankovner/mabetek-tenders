@@ -9,7 +9,8 @@ const {execFileSync}=require('node:child_process');
 const crypto=require('node:crypto');
 const root=path.resolve(__dirname,'..');
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'tender-worker-'));
-execFileSync(process.env.TSC||'tsc',['--outDir',tmp,'--target','ES2022','--module','commonjs','--allowJs','--skipLibCheck','src/worker.ts'],{cwd:root});
+const localTsc=path.join(root,'node_modules','.bin','tsc');
+execFileSync(process.env.TSC||(fs.existsSync(localTsc)?localTsc:'tsc'),['--outDir',tmp,'--target','ES2022','--module','commonjs','--allowJs','--skipLibCheck','src/worker.ts'],{cwd:root});
 const worker=require(path.join(tmp,'worker.js')).default;
 process.on('exit',()=>fs.rmSync(tmp,{recursive:true,force:true}));
 
@@ -657,4 +658,47 @@ test('Legacy national alerts are suppressed while Telegram commands still reply'
   assert.equal(sent.length,2);
   assert.ok(sent.every(message=>message.text==='Выгрузка вагонов в Хабаровске' && !Object.hasOwn(message,'location')));
  }finally{global.fetch=original;db.close();}
+});
+
+test('Mac outage is reported once, recovery resumes and long status keeps all source diagnostics',async()=>{
+  const {db,env}=fixture();
+  env.SCAN_DAILY_LIMIT='0';
+  db.prepare('INSERT INTO owner(id) VALUES(?)').run('1');
+  const lastSeen=Math.floor(Date.now()/1000)-3600;
+  db.prepare('UPDATE agent_state SET seen=? WHERE id=1').run(lastSeen);
+  const original=global.fetch,sent=[];
+  global.fetch=async(url,options)=>{
+    assert.ok(String(url).endsWith('/sendMessage'));
+    const body=JSON.parse(options.body);
+    assert.ok(body.text.length<=4096);
+    sent.push(body);
+    return Response.json({ok:true,result:{message_id:sent.length,date:Math.floor(Date.now()/1000)}});
+  };
+  const post=(path,body,headers)=>worker.fetch(new Request('https://test.invalid'+path,{method:'POST',body:JSON.stringify(body),headers}),env);
+  try{
+    await worker.scheduled({},env);
+    await worker.scheduled({},env);
+    assert.equal(sent.length,1);
+    assert.match(sent[0].text,/Mac не выходит на связь/);
+    const health={release:'abcdef0123456789',pending:7,oldest:lastSeen,unreadable:0,backup_at:lastSeen};
+    await post('/agent/heartbeat',{free_bytes:123,local:health},{Authorization:'Bearer '+env.AGENT_KEY});
+    await worker.scheduled({},env);
+    assert.equal(sent.length,2);
+    assert.match(sent[1].text,/Mac снова на связи/);
+    const status=await (await post('/agent/status',{}, {Authorization:'Bearer '+env.AGENT_KEY})).json();
+    assert.deepEqual(status.local,health);
+    for(let i=0;i<80;i++)db.prepare('INSERT INTO sources(id,url,last_error) VALUES(?,?,?)').run('source-'+i,'https://example.org/','Недоступен. '.repeat(8));
+    const update={update_id:7777,message:{chat:{type:'private',id:1},from:{id:1},text:'/status'}};
+    await post('/telegram',update,{'X-Telegram-Bot-Api-Secret-Token':env.WEBHOOK_SECRET});
+    const diagnostics=sent.slice(2).map(m=>m.text).join('\n');
+    for(let i=0;i<80;i++)assert.ok(diagnostics.includes('source-'+i+':'));
+    assert.match(diagnostics,/Находок в локальной очереди: 7/);
+    assert.match(diagnostics,/Последняя резервная копия:/);
+    const count=sent.length;
+    await post('/telegram',update,{'X-Telegram-Bot-Api-Secret-Token':env.WEBHOOK_SECRET});
+    assert.equal(sent.length,count);
+    db.exec('UPDATE agent_state SET paused=1,seen=1');
+    await worker.scheduled({},env);
+    assert.equal(sent.length,count);
+  }finally{global.fetch=original;db.close();}
 });

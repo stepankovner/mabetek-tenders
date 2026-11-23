@@ -43,6 +43,10 @@ def connection(path):
     return db
 
 def observe_catalogue(db, lot, entry):
+    from .eat_import import enqueue_candidates
+    # The observation and its upload queue entry share the same transaction.
+    # A crash between SQLite storage and the network cannot lose this candidate.
+    enqueue_candidates(db, [entry], commit=False)
     payload = json.dumps(entry, sort_keys=True, ensure_ascii=False)
     latest = db.execute(
         "SELECT sequence,payload FROM catalogue_observations WHERE lot=? AND source=? ORDER BY sequence DESC LIMIT 1",

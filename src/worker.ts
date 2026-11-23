@@ -21,6 +21,28 @@ const help='/watch ссылка — открыть извещение ЕИС, Р
 const now=()=>Math.floor(Date.now()/1000);
 const sql=(e:Env,s:string,...p:unknown[])=>e.DB.prepare(s).bind(...p);
 const response=(body:unknown,status=200)=>Response.json(body,{status});
+function splitReply(text:string){
+  const parts:string[]=[];
+  while(text.length>3800){
+    let end=text.lastIndexOf('\n',3800);
+    if(end<1900)end=3800;
+    if(/[\uD800-\uDBFF]/.test(text[end-1]))end--;
+    parts.push(text.slice(0,end));
+    text=text.slice(end).replace(/^\n/,'');
+  }
+  parts.push(text);
+  return parts;
+}
+async function localHealth(e:Env){
+  const row=await sql(e,"SELECT value FROM profile WHERE key='agent.telemetry'").first();
+  try{return row?JSON.parse(row.value):null;}catch{return null;}
+}
+async function checkAgentHealth(e:Env){
+  const agent=await sql(e,'SELECT seen,paused FROM agent_state WHERE id=1').first();
+  if(!agent?.seen||agent.paused||agent.seen>now()-1200)return;
+  await sql(e,"INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,o.id,? FROM owner o CROSS JOIN agent_state a WHERE a.id=1 AND a.seen=? AND a.paused=0 AND a.seen<=unixepoch()-1200",
+    'mac-offline/'+agent.seen,JSON.stringify({text:'Mac не выходит на связь более 20 минут. Сбор с Mac и подготовка документов задержаны. Облачный поиск продолжает работу на доступных площадках. Проверьте, что Mac включён, подключён к сети и выполнен вход в macOS. Состояние: /status.'}),agent.seen).run();
+}
 async function deliveryStats(e:Env) {
   // Один снимок D1 для обоих распределений, включая случаи без времени публикации.
   return sql(e,`WITH recent AS (
@@ -444,7 +466,10 @@ async function telegram(req:Request,e:Env){
       const budget=scanBudget(e);
       const sample=await deliveryStats(e);
       const deliveryErrors=await sql(e,"SELECT count(CASE WHEN state='failed' THEN 1 END) AS failed,count(CASE WHEN state='uncertain' THEN 1 END) AS uncertain FROM outbox WHERE created>=unixepoch()-604800 AND state IN ('failed','uncertain')").first();
-      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nСбой или неподтверждённая доставка: '+(failures?.n||0)+'\nСообщения за 7 дней: отказов Telegram '+(deliveryErrors?.failed||0)+', без подтверждения '+(deliveryErrors?.uncertain||0)+'\nКарточек ожидают Mac: '+cards?.n+'\nВозраст старейшей задачи разбора или КП, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(sample?.publication_p95_seconds!=null?Math.ceil(sample.publication_p95_seconds/60)+' мин':'нет данных')+'\nОчередь → Telegram: '+(sample?.queued||0)+' наблюдений, P95: '+(sample?.queue_p95_seconds!=null?sample.queue_p95_seconds+' с':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';break;
+      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nСбой или неподтверждённая доставка: '+(failures?.n||0)+'\nСообщения за 7 дней: отказов Telegram '+(deliveryErrors?.failed||0)+', без подтверждения '+(deliveryErrors?.uncertain||0)+'\nКарточек ожидают Mac: '+cards?.n+'\nВозраст старейшей задачи разбора или КП, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(sample?.publication_p95_seconds!=null?Math.ceil(sample.publication_p95_seconds/60)+' мин':'нет данных')+'\nОчередь → Telegram: '+(sample?.queued||0)+' наблюдений, P95: '+(sample?.queue_p95_seconds!=null?sample.queue_p95_seconds+' с':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';
+      const local=await localHealth(e);
+      if(local)reply+='\nВерсия Mac: '+local.release+'\nНаходок в локальной очереди: '+local.pending+', возраст старейшей, с: '+(local.oldest?Math.max(0,now()-local.oldest):0)+'\nБаз Mac с ошибкой чтения: '+local.unreadable+'\nПоследняя резервная копия: '+(local.backup_at?new Date(local.backup_at*1000).toISOString():'ещё не создана');
+      break;
     }
     case '/semantic':{
       if(!e.AI){reply='Бесплатная модель поиска пока не подключена.';break;}
@@ -494,8 +519,11 @@ async function telegram(req:Request,e:Env){
     }
     case '/settings':reply='/pause — приостановить Mac\n/resume — продолжить';break;
   }
+  const parts=splitReply(reply);
+  const replies=parts.map((text,index)=>sql(e,'INSERT INTO outbox(dedupe,owner,payload) VALUES(?,?,?)',
+    'update/'+u.update_id+(index?'/part/'+index:''),user,JSON.stringify({text,reply_markup:index===parts.length-1?markup:undefined})));
   try{
-    await e.DB.batch([sql(e,'INSERT INTO updates(id) VALUES(?)',u.update_id),...mutations,sql(e,'INSERT INTO outbox(dedupe,owner,payload) VALUES(?,?,?)','update/'+u.update_id,user,JSON.stringify({text:reply,reply_markup:markup}))]);
+    await e.DB.batch([sql(e,'INSERT INTO updates(id) VALUES(?)',u.update_id),...mutations,...replies]);
   }catch(err){if(!await sql(e,'SELECT 1 FROM updates WHERE id=?',u.update_id).first())throw err;}
   await deliver(e);return response({});
 }
@@ -506,7 +534,7 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const admitted=path==='/agent/check'?await pollAll(e):false;
     if(path==='/agent/check')await deliver(e);
     const {results}=await sql(e,'SELECT id,last_ok,last_error,cursor,next_at FROM sources ORDER BY id').all();
-    return response({sources:results,admitted,delivery:await deliveryStats(e)});
+    return response({sources:results,admitted,delivery:await deliveryStats(e),agent:await sql(e,'SELECT * FROM agent_state WHERE id=1').first(),local:await localHealth(e)});
   }
   if(path==='/agent/pdf'){
     const id=req.headers.get('x-job'),lease=req.headers.get('x-lease');
@@ -640,7 +668,23 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     return response({count,error:issue});
   }
   if(path==='/agent/heartbeat'){
-    await sql(e,'UPDATE agent_state SET seen=unixepoch(),free_bytes=? WHERE id=1',Number(body.free_bytes)||0).run();
+    const previous=await sql(e,'SELECT seen FROM agent_state WHERE id=1').first();
+    const mutations:Statement[]=[];
+    if(previous?.seen && previous.seen<=now()-1200){
+      const dedupe='mac-offline/'+previous.seen;
+      mutations.push(sql(e,"INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner WHERE EXISTS(SELECT 1 FROM outbox WHERE dedupe=? AND state IN ('sent','uncertain'))",
+        'mac-online/'+previous.seen,JSON.stringify({text:'Mac снова на связи. Сохранённые находки и задачи продолжат обработку. Состояние: /status.'}),dedupe),
+        sql(e,"UPDATE outbox SET state='suppressed' WHERE dedupe=? AND state='ready'",dedupe));
+    }
+    const local=body.local;
+    if(local && typeof local.release==='string' && /^(?:[a-f0-9]{16}|development)$/.test(local.release)
+       && ['pending','unreadable','backup_at'].every(k=>Number.isSafeInteger(local[k])&&local[k]>=0)
+       && (local.oldest===null||(Number.isSafeInteger(local.oldest)&&local.oldest>=0))){
+      const value=JSON.stringify({release:local.release,pending:local.pending,unreadable:local.unreadable,backup_at:local.backup_at,oldest:local.oldest});
+      mutations.push(sql(e,"INSERT INTO profile(key,value) VALUES('agent.telemetry',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",value));
+    }
+    mutations.push(sql(e,'UPDATE agent_state SET seen=unixepoch(),free_bytes=? WHERE id=1',Number(body.free_bytes)||0));
+    await e.DB.batch(mutations);
     const state=await sql(e,'SELECT paused FROM agent_state WHERE id=1').first();
     const failed=await sql(e,"SELECT s.id,m.cursor FROM sources s LEFT JOIN sources m ON m.id='mac/'||s.id WHERE s.id IN ('rosneft','roseltorg','tektorg','tektorgRzd','gpb','zakazrf','otc','fabrikant') AND s.last_error IS NOT NULL").all();
     const pending=await sql(e,"SELECT 1 FROM pending_cards WHERE available<=unixepoch() LIMIT 1").first();
@@ -682,5 +726,5 @@ export default {
     if(path.startsWith('/agent/'))return agent(req,e,path,ctx);
     return response({},404);
   },
-  async scheduled(_event:unknown,e:Env){const admitted=await pollAll(e,true);await deliver(e);if(admitted)await rankNotices(e);}
+  async scheduled(_event:unknown,e:Env){await checkAgentHealth(e);const admitted=await pollAll(e,true);await deliver(e);if(admitted)await rankNotices(e);}
 };

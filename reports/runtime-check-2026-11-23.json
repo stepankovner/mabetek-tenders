@@ -1,0 +1,237 @@
+{
+  "checked_at": "2026-11-23T16:26:16.222491+00:00",
+  "worker": "49d4197e3fa8",
+  "expected_worker": "49d4197e3fa8",
+  "installed_release": "36ed2e3bfafc19fc",
+  "files_match": {
+    "agent/daemon.py": true,
+    "agent/local.py": true,
+    "agent/eat_import.py": true,
+    "agent/eis_catalogue.py": true,
+    "agent/maintenance.py": true
+  },
+  "status": {
+    "sources": [
+      {
+        "id": "b2b",
+        "last_ok": 1795450546,
+        "last_error": null,
+        "cursor": "5",
+        "next_at": 1795451445
+      },
+      {
+        "id": "eis",
+        "last_ok": null,
+        "last_error": "Нет доступа к публичной выдаче",
+        "cursor": null,
+        "next_at": 1795451445
+      },
+      {
+        "id": "fabrikant",
+        "last_ok": 1795446947,
+        "last_error": "Источник недоступен с Worker",
+        "cursor": "Первая страница: 10",
+        "next_at": 1795451445
+      },
+      {
+        "id": "gpb",
+        "last_ok": null,
+        "last_error": "Источник недоступен с Worker",
+        "cursor": null,
+        "next_at": 1795451445
+      },
+      {
+        "id": "mac/comita-rzd",
+        "last_ok": 1795450938,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/eat",
+        "last_ok": 1795450947,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/eis-orders",
+        "last_ok": 1795450938,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/eis-price_requests",
+        "last_ok": 1795450939,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/fabrikant",
+        "last_ok": 1795450866,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/gpb",
+        "last_ok": 1795451173,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/otc",
+        "last_ok": 1795447992,
+        "last_error": "Не распознана публичная выдача на Mac",
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/otc-khab",
+        "last_ok": 1795450946,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/roseltorg",
+        "last_ok": 1795451006,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/rosneft",
+        "last_ok": 1795450954,
+        "last_error": null,
+        "cursor": "2",
+        "next_at": 0
+      },
+      {
+        "id": "mac/rts-rzd-search",
+        "last_ok": null,
+        "last_error": "РТС вернула HTTP 503 и страницу Anti-DDoS",
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/tektorg",
+        "last_ok": 1795451062,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/tektorgRzd",
+        "last_ok": 1795451116,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "mac/zakazrf",
+        "last_ok": 1795450765,
+        "last_error": null,
+        "cursor": null,
+        "next_at": 0
+      },
+      {
+        "id": "otc",
+        "last_ok": null,
+        "last_error": "HTTP 403",
+        "cursor": null,
+        "next_at": 1795451445
+      },
+      {
+        "id": "rad",
+        "last_ok": 1795450546,
+        "last_error": null,
+        "cursor": "9",
+        "next_at": 1795451445
+      },
+      {
+        "id": "roseltorg",
+        "last_ok": null,
+        "last_error": "Источник недоступен с Worker",
+        "cursor": null,
+        "next_at": 1795451445
+      },
+      {
+        "id": "rosneft",
+        "last_ok": null,
+        "last_error": "HTTP 307",
+        "cursor": null,
+        "next_at": 1795451445
+      },
+      {
+        "id": "sberWorld",
+        "last_ok": 1795450546,
+        "last_error": null,
+        "cursor": "Первая страница: 0",
+        "next_at": 1795451445
+      },
+      {
+        "id": "tektorg",
+        "last_ok": null,
+        "last_error": "HTTP 403",
+        "cursor": null,
+        "next_at": 1795451445
+      },
+      {
+        "id": "tektorgRzd",
+        "last_ok": null,
+        "last_error": "HTTP 403",
+        "cursor": null,
+        "next_at": 1795451445
+      },
+      {
+        "id": "watch/rzd",
+        "last_ok": 1795450546,
+        "last_error": null,
+        "cursor": "3",
+        "next_at": 1795451445
+      },
+      {
+        "id": "zakazrf",
+        "last_ok": null,
+        "last_error": "Источник недоступен с Worker",
+        "cursor": null,
+        "next_at": 1795451445
+      }
+    ],
+    "admitted": false,
+    "delivery": {
+      "total": 11,
+      "dated": 8,
+      "publication_p95_seconds": 2904810,
+      "queued": 11,
+      "queue_p95_seconds": 740
+    },
+    "agent": {
+      "id": 1,
+      "seen": 1795451163,
+      "paused": 0
+    },
+    "local": {
+      "release": "36ed2e3bfafc19fc",
+      "pending": 0,
+      "unreadable": 0,
+      "backup_at": 1795450448,
+      "oldest": null
+    }
+  },
+  "tests": {
+    "python": 61,
+    "node": 58,
+    "typescript": "passed"
+  },
+  "constraints": [
+    "РТС: HTTP 503 Anti-DDoS",
+    "ЕИС: первая страница плюс одна страница продолжения за цикл; полнота не измерена",
+    "Независимые экспертные метки и итоговые метрики приёмки отсутствуют",
+    "Произвольные формы заказчиков поддерживаются частично"
+  ]
+}

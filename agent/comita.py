@@ -5,7 +5,7 @@ import time
 import urllib.request
 from contextlib import closing
 from datetime import datetime, timezone
-from .eat_import import ingest, publish_candidates
+from .eat_import import ingest, try_publish
 from .local import connection
 from .sources import NoRedirect
 
@@ -55,5 +55,5 @@ def collect(path, publish=None):
     with closing(connection(path)) as db:
         result = ingest(db, cards)
         if publish is not None:
-            publish_candidates(db, cards, publish)
+            try_publish(db, cards, publish, result)
     return result

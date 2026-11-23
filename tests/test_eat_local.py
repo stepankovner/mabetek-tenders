@@ -37,9 +37,51 @@ class ScheduledImport(unittest.TestCase):
         try:
             with self.assertRaises(ValueError):
                 publish_candidates(db,[card],publish)
+            self.assertEqual(db.execute('SELECT attempts FROM publication_queue').fetchone()[0], 1)
+            publish_candidates(db,[card],publish)
+            self.assertEqual(len(attempts), 1)  # Respect retry backoff.
+            db.execute('UPDATE publication_queue SET next_at=0')
+            db.commit()
             publish_candidates(db,[card],publish)
             publish_candidates(db,[card],publish)
             self.assertEqual(len(attempts),2)
+        finally:
+            db.close()
+
+    def test_offline_find_survives_restart_and_disappearing_catalogue_page(self):
+        from agent.eat_import import connection, ingest, publish_candidates
+        card = dict(source='eat', procedure='1', lot='1', title='Выгрузка вагонов', url='original')
+        sent = []
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'inbox.sqlite'
+            db = connection(path)
+            ingest(db, [card])
+            db.close()  # The process stops before even trying the first upload.
+            db = connection(path)
+            try:
+                publish_candidates(db, [], lambda payload: sent.append(payload) or {'status':'accepted'})
+                publish_candidates(db, [], lambda payload: self.fail('duplicate'))
+                self.assertEqual(sent, [dict(procedure='1', title=card['title'], url='original')])
+                self.assertEqual(db.execute('SELECT count(*) FROM publication_queue').fetchone()[0], 0)
+            finally:
+                db.close()
+
+    def test_changed_candidate_is_not_deleted_by_ack_of_previous_payload(self):
+        import sqlite3
+        from agent.eat_import import enqueue_candidates, drain_candidates
+        db = sqlite3.connect(':memory:')
+        old = dict(procedure='1', title='Выгрузка вагонов', url='original')
+        new = dict(old, title='Выгрузка вагонов и хранение')
+        try:
+            enqueue_candidates(db, [old])
+            def updated_during_upload(payload):
+                enqueue_candidates(db, [new])
+                return {'status':'accepted'}
+            drain_candidates(db, updated_during_upload, limit=1)
+            self.assertEqual(db.execute('SELECT title FROM publication_queue').fetchone()[0], new['title'])
+            delivered = []
+            drain_candidates(db, lambda payload: delivered.append(payload) or {'status':'accepted'})
+            self.assertEqual(delivered[0]['title'], new['title'])
         finally:
             db.close()
 

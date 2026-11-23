@@ -3,6 +3,31 @@ from agent.eis_catalogue import parse
 
 
 class EIS(unittest.TestCase):
+    def test_cloud_outage_does_not_stop_pagination_or_lose_candidates(self):
+        import tempfile
+        import sqlite3
+        from pathlib import Path
+        from unittest.mock import patch
+        from agent.eis_catalogue import collect
+        def page(number, ident):
+            return f'''<input id="pageNumber" value="{number}">
+            {'<a data-pagenumber="2"></a>' if number == 1 else ''}
+            <div class="search-registry-entry-block box">
+            <span class="registry-entry__header-mid__number"><a href="/epz/pricereq/card/common-info.html?reestrNumber={ident}">№ {ident}</a></span>
+            <span class="registry-entry__header-mid__title">Подача предложений</span>
+            <div class="registry-entry__body-value">Выгрузка вагонов</div>'''
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'inbox.sqlite'
+            with patch('agent.eis_catalogue.read_page', side_effect=[page(1, '0332200065926000089'), page(2, '0332200065926000090')]):
+                def offline(payload):
+                    raise OSError('Worker unavailable')
+                result = collect('price_requests', path, offline)
+            self.assertEqual(result['unique'], 2)
+            self.assertTrue(result['publication_pending'])
+            self.assertNotIn('reason', result)
+            with sqlite3.connect(path) as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM publication_queue').fetchone()[0], 2)
+
     def test_accepting_price_request_uses_exact_original_number(self):
         page = """<div class="search-registry-entry-block box">
         <span class="registry-entry__header-mid__number"><a href="/epz/pricereq/card/common-info.html?reestrNumber=0332200065926000089">№ 0332200065926000089</a></span>

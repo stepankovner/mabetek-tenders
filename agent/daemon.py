@@ -86,6 +86,89 @@ _collector_threads = {}
 _collector_due = {}
 _collector_failures = {}
 _collectors_paused = None
+_publication_thread = None
+_maintenance_thread = None
+_maintenance_due = 0
+
+PUBLICATIONS = {
+    'eat-inbox.sqlite': 'eat-candidate',
+    'comita-inbox.sqlite': 'comita-candidate',
+    'rts-inbox.sqlite': 'rts-candidate',
+    'otc-khab-inbox.sqlite': 'otc-region-candidate',
+    'eis-orders.sqlite': 'eis-candidate',
+    'eis-price_requests.sqlite': 'eis-candidate',
+}
+
+
+def replay_publications(conf):
+    from contextlib import closing
+    from .eat_import import drain_candidates
+    from .local import connection
+    # Each database is independent: a bad response from one source must not
+    # prevent previously collected candidates from the others reaching D1.
+    for name, endpoint in PUBLICATIONS.items():
+        path = CONFIG.parent / name
+        if not path.is_file():
+            continue
+        try:
+            with closing(connection(path)) as db:
+                drain_candidates(db, lambda card: request(conf, endpoint, card), limit=1)
+        except Exception as error:
+            print(time.strftime('%Y-%m-%d %H:%M:%S'), 'Передача ' + name + ':',
+                  type(error).__name__, file=sys.stderr, flush=True)
+
+
+def schedule_publications(conf):
+    import threading
+    global _publication_thread
+    if _publication_thread and _publication_thread.is_alive():
+        return
+    _publication_thread = threading.Thread(target=replay_publications, args=(conf,), daemon=True)
+    _publication_thread.start()
+
+
+def schedule_maintenance():
+    import threading
+    global _maintenance_thread, _maintenance_due
+    if time.monotonic() < _maintenance_due or (_maintenance_thread and _maintenance_thread.is_alive()):
+        return
+    _maintenance_due = time.monotonic() + 3600
+    def run():
+        from .maintenance import maintain
+        try:
+            files = maintain(CONFIG.parent)
+            if files:
+                print(time.strftime('%Y-%m-%d %H:%M:%S'), 'Проверены резервные копии:',
+                      len(files), file=sys.stderr, flush=True)
+        except Exception as error:
+            print(time.strftime('%Y-%m-%d %H:%M:%S'), 'Резервное копирование:',
+                  type(error).__name__, file=sys.stderr, flush=True)
+    _maintenance_thread = threading.Thread(target=run, daemon=True)
+    _maintenance_thread.start()
+
+
+def local_health():
+    import sqlite3
+    from contextlib import closing
+    pending, oldest, unreadable = 0, None, 0
+    for name in PUBLICATIONS:
+        path = CONFIG.parent / name
+        if not path.is_file():
+            continue
+        try:
+            with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.5)) as db:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='publication_queue'").fetchone():
+                    count, created = db.execute('SELECT count(*),min(created) FROM publication_queue').fetchone()
+                    pending += count
+                    if created is not None:
+                        oldest = min(oldest, created) if oldest is not None else created
+        except sqlite3.Error:
+            unreadable += 1
+    snapshots = list((CONFIG.parent / 'backups').glob('*.sqlite'))
+    backup_at = int(max((p.stat().st_mtime for p in snapshots), default=0))
+    release = Path(__file__).resolve().parents[1].name
+    return dict(release=release if re.fullmatch('[a-f0-9]{16}', release) else 'development',
+                pending=pending, oldest=oldest, unreadable=unreadable, backup_at=backup_at)
 
 
 def start_collector(conf, source, name, collect):
@@ -108,6 +191,8 @@ def start_collector(conf, source, name, collect):
             detail = f"{result['unique']} карточек, добавлено {result['inserted']}"
             if partial:
                 detail += ' (частичный обход: ' + reason + ')'
+            if result.get('publication_pending'):
+                detail += ' (передача в Worker сохранена в локальной очереди)'
         except Exception as exc:
             partial = False
             ok = False
@@ -170,8 +255,9 @@ def schedule_catalogues(conf):
 
 def tick(conf):
     global _collectors_paused
+    schedule_maintenance()
     try:
-        status=request(conf,"heartbeat",{"free_bytes":shutil.disk_usage(CONFIG.parent).free})
+        status=request(conf,"heartbeat",{"free_bytes":shutil.disk_usage(CONFIG.parent).free, "local":local_health()})
     except OSError:
         # Continue collecting to SQLite while the cloud is briefly unavailable.
         if _collectors_paused is False:
@@ -179,6 +265,7 @@ def tick(conf):
         raise
     _collectors_paused = bool(status["paused"])
     if _collectors_paused:return
+    schedule_publications(conf)
     schedule_catalogues(conf)
     job=request(conf,"claim",{})
     if not job:
@@ -250,12 +337,13 @@ def install():
     subprocess.run(["launchctl","kickstart","-k",domain+"/"+LABEL],check=True)
 
 def main():
+    os.umask(0o077)
     p=argparse.ArgumentParser();p.add_argument("--install",action="store_true");p.add_argument("--once",action="store_true")
     args=p.parse_args()
     if args.install:install();return
     while True:
         try:tick(settings())
-        except (OSError,ValueError,KeyError) as e:
+        except Exception as e:
             detail = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
             print(time.strftime("%Y-%m-%d %H:%M:%S"),"Агент:",detail,file=sys.stderr,flush=True)
             if args.once:raise SystemExit(1)

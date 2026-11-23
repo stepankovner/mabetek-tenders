@@ -1,6 +1,6 @@
 """Import the public browser collector's JSON into the local inbox."""
 import argparse
-from contextlib import closing
+from contextlib import closing, nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -47,12 +47,18 @@ def ingest(db, cards):
     return dict(unique=len(cards),inserted=inserted,differences=differences)
 
 
-def publish_candidates(db, cards, publish, *, sample_nonmatches=False):
-    # Retry while the catalogue still shows the procedure as open.
+def publication_schema(db):
     db.execute("CREATE TABLE IF NOT EXISTS eat_receipts(url TEXT PRIMARY KEY, title TEXT NOT NULL)")
-    if sample_nonmatches:
-        db.execute("CREATE TABLE IF NOT EXISTS review_receipts(url TEXT PRIMARY KEY, title TEXT NOT NULL)")
-    attempted = 0
+    db.execute("CREATE TABLE IF NOT EXISTS review_receipts(url TEXT PRIMARY KEY, title TEXT NOT NULL)")
+    db.execute("""CREATE TABLE IF NOT EXISTS publication_queue (
+        url TEXT NOT NULL, review INTEGER NOT NULL, title TEXT NOT NULL,
+        payload TEXT NOT NULL, next_at INTEGER NOT NULL DEFAULT 0,
+        attempts INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL DEFAULT(unixepoch()),
+        PRIMARY KEY(url,review))""")
+
+
+def enqueue_candidates(db, cards, *, sample_nonmatches=False, commit=True):
+    publication_schema(db)
     candidates = []
     sample = []
     for card in cards:
@@ -63,24 +69,69 @@ def publish_candidates(db, cards, publish, *, sample_nonmatches=False):
             sample.append((hashlib.sha256(card['url'].encode()).digest(), card, title))
     # One stable sample per page for semantic review, after normal notifications.
     sample.sort(key=lambda item: item[0])
-    for card, title, review in candidates + [(card, title, True) for _, card, title in sample]:
-        receipts = 'review_receipts' if review else 'eat_receipts'
-        if db.execute(f"SELECT 1 FROM {receipts} WHERE url=? AND title=?",
-                      (card['url'], title)).fetchone():
-            continue
-        payload = dict(procedure=card['procedure'], url=card['url'], title=title)
-        if card.get('source') == 'comita-rzd' and card.get('published'):
-            payload['published'] = card['published']
-        if review:
-            payload['review'] = True
-        reply = publish(payload)
-        if reply.get('status') not in ('accepted', 'filtered'):
-            raise ValueError('Worker не подтвердил обработку карточки ЕАТ')
+    with db if commit else nullcontext():
+        for card, title, review in candidates + [(card, title, True) for _, card, title in sample]:
+            receipts = 'review_receipts' if review else 'eat_receipts'
+            if db.execute(f"SELECT 1 FROM {receipts} WHERE url=? AND title=?",
+                          (card['url'], title)).fetchone():
+                continue
+            payload = dict(procedure=card['procedure'], url=card['url'], title=title)
+            if card.get('source') == 'comita-rzd' and card.get('published'):
+                payload['published'] = card['published']
+            if review:
+                payload['review'] = True
+            db.execute("""INSERT INTO publication_queue(url,review,title,payload) VALUES(?,?,?,?)
+                ON CONFLICT(url,review) DO UPDATE SET title=excluded.title,payload=excluded.payload,
+                next_at=0,attempts=0 WHERE publication_queue.title!=excluded.title""",
+                (card['url'], int(review), title, json.dumps(payload, ensure_ascii=False)))
+
+
+def drain_candidates(db, publish, *, limit=3):
+    publication_schema(db)
+    sent = 0
+    for _ in range(limit):
         with db:
-            db.execute(f"INSERT OR REPLACE INTO {receipts} VALUES(?,?)", (card['url'], title))
-        attempted += 1
-        if attempted == 3 or review:
+            row = db.execute("""UPDATE publication_queue SET next_at=unixepoch()+120,attempts=attempts+1
+                WHERE (url,review)=(SELECT url,review FROM publication_queue WHERE next_at<=unixepoch()
+                ORDER BY review,created,url LIMIT 1) RETURNING url,review,title,payload,attempts""").fetchone()
+        if row is None:
             break
+        url, review, title, payload, attempts = row
+        try:
+            reply = publish(json.loads(payload))
+            if not isinstance(reply, dict) or reply.get('status') not in ('accepted', 'filtered'):
+                raise ValueError('Worker не подтвердил обработку карточки')
+        except Exception as error:
+            from urllib.error import HTTPError
+            from .sources import retry_after
+            delay = min(3600, 45 * 2 ** min(attempts - 1, 7))
+            if isinstance(error, HTTPError) and error.code == 429:
+                delay = max(delay, retry_after(error.headers))
+            with db:
+                db.execute("UPDATE publication_queue SET next_at=unixepoch()+? WHERE url=? AND review=? AND payload=?",
+                           (delay, url, review, payload))
+            raise
+        receipts = 'review_receipts' if review else 'eat_receipts'
+        with db:
+            db.execute(f"INSERT OR REPLACE INTO {receipts} VALUES(?,?)", (url, title))
+            db.execute("DELETE FROM publication_queue WHERE url=? AND review=? AND payload=?", (url, review, payload))
+        sent += 1
+        if review:
+            break
+    return sent
+
+
+def publish_candidates(db, cards, publish, *, sample_nonmatches=False):
+    enqueue_candidates(db, cards, sample_nonmatches=sample_nonmatches)
+    return drain_candidates(db, publish)
+
+
+def try_publish(db, cards, publish, result, **kwargs):
+    try:
+        publish_candidates(db, cards, publish, **kwargs)
+    except (OSError, ValueError):
+        # Collection and pagination continue even when the delivery channel fails.
+        result['publication_pending'] = True
 
 
 def collect_browser(node, modules, path, script, parse, publish, *, args=('5',)):
@@ -92,7 +143,7 @@ def collect_browser(node, modules, path, script, parse, publish, *, args=('5',))
     with closing(connection(path)) as db:
         result = ingest(db, cards)
         if publish is not None:
-            publish_candidates(db, cards, publish)
+            try_publish(db, cards, publish, result)
         return result
 
 
