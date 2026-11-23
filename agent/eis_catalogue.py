@@ -6,6 +6,7 @@ import ssl
 import urllib.request
 import threading
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError
@@ -75,7 +76,23 @@ def read_card(block, registry):
                 url=url, title=title, status=status)
 
 
-def parse(page, registry, *, rejected=None):
+def past_catalogue_deadline(block, registry, day):
+    label = "Окончание подачи заявок" if registry == "orders" else "Предоставление ценовой информации"
+    match = re.search(r'<div class="data-block__title(?:\s[^"]*)?">\s*' + label +
+                      r'\s*</div>\s*<div class="data-block__value(?:\s[^"]*)?">(.*?)</div>', block, re.S)
+    if not match:
+        return False
+    dates = re.findall(r'\b\d{2}\.\d{2}\.\d{4}\b', text(match[1]))
+    expected = 1 if registry == "orders" else 2
+    if len(dates) != expected:
+        return False
+    try:
+        return datetime.strptime(dates[-1], "%d.%m.%Y").date() < day
+    except ValueError:
+        return False
+
+
+def parse(page, registry, *, rejected=None, today=None):
     parts = BLOCK.split(page)[1:]
     if not parts:
         if re.search(r'<p class="noRecords">\s*Поиск не дал результатов\s*</p>', page):
@@ -83,6 +100,10 @@ def parse(page, registry, *, rejected=None):
         raise ValueError("ЕИС не вернула распознаваемые карточки")
     cards = []
     seen = set()
+    if today is None:
+        # Dates in the catalogue have no zone. Use a conservative cutoff so
+        # a date that's still current in the customer's zone is never dropped.
+        today = (datetime.now(timezone.utc) - timedelta(hours=12)).date()
     for block in parts:
         try:
             card = read_card(block, registry)
@@ -94,7 +115,7 @@ def parse(page, registry, *, rejected=None):
             rejected.append(str(error))
             continue
         seen.add(card["procedure"])
-        if card["status"].casefold() in ACTIVE:
+        if card["status"].casefold() in ACTIVE and not past_catalogue_deadline(block, registry, today):
             cards.append(card)
     if not seen:
         raise ValueError("ЕИС не вернула ни одной распознанной карточки")
@@ -127,7 +148,8 @@ def read_html(url, procedure=None):
 def read_page(registry, number=1, *, term=None):
     url = HOST + REGISTRIES[registry]
     if term is not None:
-        params = dict(searchString=term, pageNumber=number, recordsPerPage="_50", morphology="on")
+        params = dict(searchString=term, pageNumber=number, recordsPerPage="_50", morphology="on",
+                      sortBy="PUBLISH_DATE", sortDirection="false")
         if registry == "orders":
             params["af"] = "on"
         url += "?" + urlencode(params)
@@ -230,7 +252,8 @@ def collect_search(registry, path, publish=None, *, terms=None):
         db.execute("""CREATE TABLE IF NOT EXISTS eis_search_cursor(
             term TEXT PRIMARY KEY, next_page INTEGER NOT NULL)""")
         for term in terms:
-            row = db.execute("SELECT next_page FROM eis_search_cursor WHERE term=?", (term,)).fetchone()
+            cursor_key = "publication:" + term
+            row = db.execute("SELECT next_page FROM eis_search_cursor WHERE term=?", (cursor_key,)).fetchone()
             number = row[0] if row else 2
             for page_number in (1, number):
                 try:
@@ -255,14 +278,14 @@ def collect_search(registry, path, publish=None, *, terms=None):
                     advertised = [int(n) for n in re.findall(r'data-pagenumber="(\d+)"', page)]
                     if max(advertised, default=1) < number:
                         with db:
-                            db.execute("DELETE FROM eis_search_cursor WHERE term=?", (term,))
+                            db.execute("DELETE FROM eis_search_cursor WHERE term=?", (cursor_key,))
                         break
                 if page_number == 1 and number == 2 and 'data-pagenumber="2"' not in page:
                     break
                 if page_number == number and not rejected:
                     following = number + 1 if f'data-pagenumber="{number+1}"' in page else 2
                     with db:
-                        db.execute("INSERT OR REPLACE INTO eis_search_cursor VALUES(?,?)", (term, following))
+                        db.execute("INSERT OR REPLACE INTO eis_search_cursor VALUES(?,?)", (cursor_key, following))
             if "retry_after" in result:
                 break
         result["unique"] = len(cards)

@@ -3,6 +3,23 @@ from agent.eis_catalogue import parse
 
 
 class EIS(unittest.TestCase):
+    def test_past_deadline_overrides_stale_active_status_in_both_registries(self):
+        from datetime import date
+        for registry, path, number, status, label, dates in (
+            ('orders', '/epz/order/notice/notice223/common-info.html?regNumber=', '31604329553',
+             'Подача заявок', 'Окончание подачи заявок', '06.12.2016'),
+            ('price_requests', '/epz/pricereq/card/common-info.html?reestrNumber=', '0332200065926000089',
+             'Подача предложений', 'Предоставление ценовой информации', '20.11.2026 12:00 - 22.11.2026 14:00'),
+        ):
+            with self.subTest(registry=registry):
+                block = f'''<div class="search-registry-entry-block box">
+                <span class="registry-entry__header-mid__number"><a href="{path}{number}">№ {number}</a></span>
+                <span class="registry-entry__header-mid__title">{status}</span>
+                <div class="registry-entry__body-value">Выгрузка вагонов</div>
+                <div class="data-block__title">{label}</div><div class="data-block__value">{dates}</div>'''
+                self.assertEqual(parse(block, registry, today=date(2026, 11, 23)), [])
+                self.assertEqual(len(parse(block, registry, today=date(2016, 12, 6))), 1)
+
     def test_targeted_search_validates_query_and_accepts_eis_empty_page(self):
         from unittest.mock import patch
         from agent.eis_catalogue import read_page
