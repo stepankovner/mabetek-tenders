@@ -17,7 +17,7 @@ interface Env {
   DB:{prepare(sql:string):Statement;batch(sql:Statement[]):Promise<{meta:{changes:number}}[]>};
   SCAN_DAILY_LIMIT?:string; SCAN_COMMAND_RESERVE?:string; RELEASE?:string; AI?:{run:Function}; WEBHOOK_SECRET:string; BOT_TOKEN:string; AGENT_KEY:string;
 }
-const help='/watch ссылка — открыть извещение ЕИС, РЖД или лот Росэлторга\n/status — источники и Mac\n/check — запросить обход\n/inbox — последние извещения\n/settings — управление агентом\n/semantic — смысловая подборка';
+const help='/watch ссылка — открыть извещение ЕИС, РЖД или лот Росэлторга\n/status — источники и Mac\n/sources — ссылки для ручного поиска\n/check — запросить обход\n/inbox — последние извещения\n/settings — управление агентом\n/semantic — смысловая подборка';
 const now=()=>Math.floor(Date.now()/1000);
 const sql=(e:Env,s:string,...p:unknown[])=>e.DB.prepare(s).bind(...p);
 const response=(body:unknown,status=200)=>Response.json(body,{status});
@@ -411,6 +411,20 @@ async function telegram(req:Request,e:Env){
       const admitted=await pollAll(e);
       if(admitted)await rankNotices(e);
       reply=admitted?'Проверка обработана с учётом интервала опроса. Результат в /status.':'Дневной бюджет обходов исчерпан. Новый бюджет начнётся в 00:00 UTC.';
+      break;
+    }
+    case '/sources':{
+      reply='Для ручного поиска выберите регион исполнения «Хабаровский край» и действующий приём заявок или предложений. Ищите по одному запросу: «выгрузка вагонов», «железнодорожный тупик», «перевалка», «склад с подъездным путём». Адрес и обязательные услуги сверяйте в ТЗ.\n\nОригиналы ЕИС, карточки РЖД из секции РТС и ссылки на отдельные лоты Росэлторга можно прислать сюда командой /watch.';
+      markup={inline_keyboard:[
+        [{text:'ЕИС · закупки',url:'https://zakupki.gov.ru/epz/order/extendedsearch/results.html'},{text:'ЕИС · запросы цен',url:'https://zakupki.gov.ru/epz/pricereq/search/results.html'}],
+        [{text:'РТС · поиск',url:'https://www.rts-tender.ru/poisk/'},{text:'РЖД · секция РТС',url:'https://rzd.rts-tender.ru/'}],
+        [{text:'ЕАТ Берёзка',url:'https://agregatoreat.ru/purchases/all'},{text:'OTC · Хабаровский край',url:'https://market.otc.ru/khabkray'}],
+        [{text:'Росэлторг',url:publicCatalogues.roseltorg.url},{text:'Сбербанк-АСТ',url:'https://www.sberbank-ast.ru/'}],
+        [{text:'ТЭК-Торг',url:publicCatalogues.tektorg.url},{text:'Роснефть',url:publicCatalogues.rosneft.url}],
+        [{text:'Фабрикант',url:publicCatalogues.fabrikant.url},{text:'ЗаказРФ',url:publicCatalogues.zakazrf.url}],
+        [{text:'ЭТП ГПБ',url:publicCatalogues.gpb.url},{text:'КОМИТА',url:'https://market.comita.ru/purchases223'}],
+        [{text:'B2B-Center',url:'https://www.b2b-center.ru/app/next/market-search/'},{text:'РАД',url:'https://gz.lot-online.ru/etp_front/'}]
+      ]};
       break;
     }
     case '/status':{
