@@ -5,11 +5,20 @@ import unittest
 import zipfile
 from pathlib import Path
 import pymupdf
-from agent.evaluate import metrics
+from agent.evaluate import acceptance_sample, metrics, selection_targets
 from agent.pipeline import extract,quote
 from agent.local import ROOT
 
 class More(unittest.TestCase):
+    def test_selection_targets_require_observations_and_exact_thresholds(self):
+        for recall, precision, expected in (
+            ([9, 10], [7, 10], [True, True]),
+            ([899, 1000], [699, 1000], [False, False]),
+            ([0, 0], [0, 0], [None, None]),
+        ):
+            result = selection_targets(dict(recall=recall, urgent_precision=precision))
+            self.assertEqual([result[k]["met"] for k in ("recall", "urgent_precision")], expected)
+
     def test_xlsx_zip(self):
         with tempfile.TemporaryDirectory() as td:
             doc=Path(td)/"units.xlsx"
@@ -35,8 +44,23 @@ class More(unittest.TestCase):
         gold={"one":{"label":"рассмотреть"},"two":{"label":"нужно уточнение"},"three":{"label":"отклонить"}}
         report=metrics(gold,{"one":{"shown":True,"urgent":True},"three":{"shown":True,"urgent":True}})
         self.assertEqual(report["recall"],[1,2])
+        self.assertEqual(report["recall_by_class"],{"рассмотреть":[1,1],"нужно уточнение":[0,1]})
         self.assertEqual(report["urgent_precision"],[1,2])
         self.assertEqual(report["omitted_from_collection"],["two"])
+
+    def test_sample_target_counts_both_useful_classes(self):
+        gold = {i: {"label": "отклонить"} for i in range(200)}
+        for i in range(29):
+            gold[i]["label"] = "рассмотреть"
+        gold[29]["label"] = "нужно уточнение"
+        self.assertEqual(acceptance_sample(gold), {
+            "lots": 200, "useful": 30, "confirmed": 29, "size_target_met": True})
+        gold[29]["label"] = "отклонить"
+        self.assertFalse(acceptance_sample(gold)["size_target_met"])
+        gold[29]["label"] = "рассмотреть"
+        self.assertTrue(acceptance_sample(gold)["size_target_met"])
+        del gold[199]
+        self.assertFalse(acceptance_sample(gold)["size_target_met"])
 
     def test_no_guessed_rates(self):
         base=json.loads((ROOT/"examples/terms-demo.json").read_text())
