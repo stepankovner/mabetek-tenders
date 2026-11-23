@@ -1,4 +1,4 @@
-import {b2bIndex,b2bTitle,rosneftPage,publicCatalogues,publicIndex,catalogueMatch,construction,infrastructureOnly,eisOrderNumber} from './core.mjs';
+import {b2bIndex,b2bTitle,rosneftPage,publicCatalogues,publicIndex,catalogueMatch,eisOrderNumber} from './core.mjs';
 const catalog='https://www.b2b-center.ru/app/next/market-search/';
 const queries=['погрузочно-разгрузочные','перевалка','железнодорожный тупик','ответственное хранение','постановка вагонов','путь необщего пользования'];
 class RateLimit extends Error {
@@ -40,16 +40,31 @@ export async function b2b(e:any){
     search.search=new URLSearchParams({q:queries[index],fz_type:'all',company_type:'2',include_firm_tree:'false',sort:'date_desc',trade:'buy',show:'actual'}).toString();
     const rows=b2bIndex(await page(search.href));
     const batch=[];
+    let unread=0;
+    let limited:RateLimit|undefined;
     for(const c of rows){
       // The actual title is obtained from the original, never reconstructed from a slug.
       const old=await q('SELECT title,published FROM notices WHERE url=?',c.url).first();
       if(old && (!c.title || old.title===c.title) && (!c.published || old.published===c.published))continue;
-      const title=c.title||old?.title||b2bTitle(await page(c.url),c.id);
+      let title=c.title||old?.title;
+      if(!title){
+        try{title=b2bTitle(await page(c.url),c.id);}
+        catch(err){
+          unread++;
+          if(err instanceof RateLimit){limited=err;break;}
+          continue;
+        }
+      }
       batch.push(q("INSERT INTO notices(url,title,description,published) VALUES(?,?,'B2B-Center · место и документы требуют проверки',?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,published=coalesce(excluded.published,notices.published),updated=max(unixepoch(),updated+1) WHERE title!=excluded.title OR (excluded.published IS NOT NULL AND notices.published IS NOT excluded.published)",c.url,title,c.published||null));
-      if(!construction.test(title)&&!infrastructureOnly(title))batch.push(q("INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner",'b2b/'+c.id,JSON.stringify({text:'Подборка B2B-Center · проверить место исполнения\n'+title+'\n'+c.url})));
+      if(catalogueMatch(title))batch.push(q("INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner",'b2b/'+c.id,JSON.stringify({text:'Подборка B2B-Center · проверить место исполнения\n'+title+'\n'+c.url})));
 
     }
-    batch.push(q("UPDATE sources SET last_ok=unixepoch(),cursor=?,last_error=NULL WHERE id='b2b'",String((index+1)%queries.length)));
+    if(limited){
+      batch.push(q("UPDATE sources SET last_error=?,next_at=max(next_at,?) WHERE id='b2b'",'Частичный обход. HTTP 429 при чтении оригинала',limited.retryAt));
+    }else{
+      const cursor=String((index+1)%queries.length);
+      batch.push(q("UPDATE sources SET last_ok=CASE WHEN ? IS NULL THEN unixepoch() ELSE last_ok END,cursor=?,last_error=? WHERE id='b2b'",unread||null,cursor,unread?'Частичный обход. Оригиналов не прочитано: '+unread:null));
+    }
     await e.DB.batch(batch);
   }catch(err){
     const reason=err instanceof Error && /^(HTTP \d+|Не распознана|Нет заголовка|Лимит размера)/.test(err.message)?err.message:'Источник недоступен с Worker';

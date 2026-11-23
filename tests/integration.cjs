@@ -52,6 +52,16 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    await talk('/start fixture-pairing');
    await talk('/start fixture-pairing',2);
    assert.equal(sent.length,1);
+   await talk('/sources',2);
+   assert.equal(sent.length,1);
+   await talk('/sources');
+   const sources=sent.at(-1);
+   assert.match(sources.text,/Хабаровский край/);
+   assert.match(sources.text,/\/watch/);
+   const sourceLinks=sources.reply_markup.inline_keyboard.flat();
+   assert.equal(sourceLinks.length,16);
+   assert.ok(sourceLinks.every(({url})=>new URL(url).protocol==='https:'));
+   assert.ok(sourceLinks.some(({url})=>url==='https://www.rts-tender.ru/poisk/'));
    await talk('/watch '+card);const n=sent.length;await talk('/watch '+card,1,seq);assert.equal(sent.length,n);
    const liveCard=sent.at(-1);
    const docsButton=liveCard.reply_markup.inline_keyboard.flat().find(b=>b.text==='Документы');
@@ -124,10 +134,12 @@ test('B2B stores one notice from a tracked catalogue URL and honors Retry-After'
   const monitor=require(path.join(tmp,'monitor.js'));
   const previous=global.fetch;
   const slug='/market/pogruzka-vagonov/tender-1234567/';
+  const unrelated='/market/dostavka-kantstovarov/tender-2345678/';
   let limited=true;
   global.fetch=async url=>{
     if(limited)return new Response(null,{status:429,headers:{'Retry-After':'2400'}});
-    if(String(url).includes('market-search'))return new Response('<a href="'+slug+'#btid=2"></a><a href="'+slug+'">№ 1234567</a>');
+    if(String(url).includes('market-search'))return new Response('<a href="'+slug+'#btid=2"></a><a href="'+slug+'">№ 1234567</a><a href="'+unrelated+'">№ 2345678</a>');
+    if(url==='https://www.b2b-center.ru'+unrelated)return new Response('<title>Доставка канцелярских товаров — Тендер № 2345678 — B2B-Center</title>');
     assert.equal(url,'https://www.b2b-center.ru'+slug);
     return new Response('<title>Погрузка вагонов — Тендер № 1234567 — B2B-Center</title>');
   };
@@ -139,10 +151,43 @@ test('B2B stores one notice from a tracked catalogue URL and honors Retry-After'
       db.exec("UPDATE sources SET next_at=0 WHERE id='b2b'");
       await monitor.b2b(env);
     }
-    assert.equal(db.prepare('SELECT title FROM notices').get().title,'Погрузка вагонов');
+    assert.deepEqual(db.prepare('SELECT title FROM notices ORDER BY title').all().map(r=>r.title),['Доставка канцелярских товаров','Погрузка вагонов']);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n,1);
+    assert.equal(db.prepare('SELECT dedupe FROM outbox').get().dedupe,'b2b/1234567');
     assert.equal(db.prepare("SELECT last_error FROM sources WHERE id='b2b'").get().last_error,null);
   }finally{global.fetch=previous;db.close();}
+});
+test('B2B retains verified notices when original cards fail or hit a limit',async()=>{
+ const {db,env}=fixture(),previous=global.fetch;
+ const monitor=require(path.join(tmp,'monitor.js'));
+ let rateLimit=false;
+ const seen=[];
+ global.fetch=async url=>{
+   if(String(url).includes('market-search'))return new Response([1111,2222,3333].map(id=>'<a href="/market/card/tender-'+id+'/">'+id+'</a>').join(''));
+   const id=String(url).match(/tender-(\d+)/)[1];
+   seen.push(id);
+   if(id==='2222')return rateLimit
+     ?new Response(null,{status:429,headers:{'Retry-After':'2400'}})
+     :new Response(null,{status:404});
+   return new Response('<title>Погрузка вагонов — Тендер № '+id+' — B2B-Center</title>');
+ };
+ try{
+   db.exec("INSERT INTO owner(id) VALUES('1')");
+   await monitor.b2b(env);
+   assert.deepEqual(seen,['1111','2222','3333']);
+   assert.equal(db.prepare('SELECT count(*) AS n FROM notices').get().n,2);
+   const partial=db.prepare("SELECT cursor,last_ok,last_error FROM sources WHERE id='b2b'").get();
+   assert.equal(partial.last_ok,null);
+   assert.match(partial.last_error,/Частичный обход/);
+   rateLimit=true;
+   db.exec("DELETE FROM notices WHERE url LIKE '%3333%'; UPDATE sources SET next_at=0");
+   await monitor.b2b(env);
+   assert.deepEqual(seen,['1111','2222','3333','2222']);
+   const limited=db.prepare("SELECT cursor,last_error,next_at-unixepoch() AS delay FROM sources WHERE id='b2b'").get();
+   assert.equal(limited.cursor,partial.cursor);
+   assert.match(limited.last_error,/HTTP 429/);
+   assert.ok(limited.delay>=2399);
+ }finally{global.fetch=previous;db.close();}
 });
 test('Scheduled EIS poll sends a matching notice once and skips unrelated supplies',async()=>{
  const {db,env}=fixture();
