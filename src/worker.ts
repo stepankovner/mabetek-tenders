@@ -105,50 +105,67 @@ async function retryDelay(r:Response){
 function cooldown(e:Env,seconds:number){
   return sql(e,'INSERT INTO telegram_cooldown(id,until_ts) VALUES(1,unixepoch()+?) ON CONFLICT(id) DO UPDATE SET until_ts=max(until_ts,excluded.until_ts)',seconds);
 }
+async function telegramSend(e:Env,method:'sendMessage'|'sendDocument',body:string|FormData){
+  try{
+    return await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/'+method,{
+      method:'POST',body,headers:typeof body==='string'?{'Content-Type':'application/json'}:undefined,
+      signal:AbortSignal.timeout(10000)
+    });
+  }catch{
+    // The request may have reached Telegram. The database already records uncertainty.
+    return null;
+  }
+}
+async function telegramResult(response:Response|null){
+  const ack=response&&!response.bodyUsed?await response.json().catch(()=>null):null;
+  if(response?.ok&&ack?.ok===true&&Number.isSafeInteger(ack.result?.message_id))return {state:'sent' as const,ack:ack.result};
+  if(response&&[400,401,403,404].includes(response.status)&&ack?.ok===false&&ack.error_code===response.status)
+    return {state:'failed' as const};
+  return {state:'uncertain' as const};
+}
 async function deliver(e:Env) {
   for(let n=0;n<5;n++){
     // Persist uncertainty before sending. Never resend a possible successful delivery automatically.
     const m=await sql(e,"UPDATE outbox SET state='uncertain' WHERE id=(SELECT id FROM outbox WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM telegram_cooldown WHERE until_ts>unixepoch()) ORDER BY id LIMIT 1) RETURNING *").first();
     if(!m)return;
     const payload=JSON.parse(m.payload);
-    let r:Response;
+    let r:Response|null;
     if(payload.word){
       const {lot,vat}=payload.word;
       const test=payload.word.deliveryTest===true;
       const draft=draftWord(lot,vat,test),form=new FormData();
       form.set('chat_id',m.owner);form.set('document',draft.file,test?'Mabetek-delivery-test.docx':'RZD-32616584495-'+(lot?'lot-'+lot:'blank')+'.docx');
       form.set('caption',test?'Тест доставки DOCX. Лот и ставка НДС учебные. Для подачи не используется.':(payload.word.cached?'Бланк из ранее проверенной копии приложения. Сверьте его с оригиналом перед подачей. ':'')+'Черновик технического предложения РЖД. '+(draft.filled?'Ставка НДС перенесена из ваших условий.':'Поле ставки НДС оставлено пустым. Подтвердите его заполнение вручную.')+(lot?'':' Впишите номер лота из извещения.')+' Проверьте пункт 1 о полном соответствии ТЗ и место оказания услуг до подачи. Сведения об участнике, персонале и согласия оформляются отдельно.');
-      r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendDocument',{method:'POST',body:form,signal:AbortSignal.timeout(10000)});
+      r=await telegramSend(e,'sendDocument',form);
     }else{
-      r=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendMessage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chat_id:m.owner,...payload}),signal:AbortSignal.timeout(10000)});
+      r=await telegramSend(e,'sendMessage',JSON.stringify({chat_id:m.owner,...payload}));
     }
-    const delay=await retryDelay(r);
+    const delay=r?await retryDelay(r):null;
     if(delay!==null){
       await e.DB.batch([cooldown(e,delay),sql(e,"UPDATE outbox SET state='ready' WHERE id=? AND state='uncertain'",m.id)]);
       return;
     }
-    if(r.ok){
-      const ack=await r.json() as any;
-      if(ack.ok){
-        const changes=[sql(e,"UPDATE outbox SET state='sent',message_id=? WHERE id=?",ack.result.message_id,m.id)];
-        const key=String(m.dedupe);
-        const source=key.startsWith('eis/')?'eis':key.startsWith('b2b/')?'b2b':key.startsWith('https://')?'catalogue':null;
-        if(source && Number.isSafeInteger(ack.result.date)){
-          let published=null;
-          {
-            const noticeUrl=source==='b2b'?String(payload.text||'').trim().split('\n').pop():source==='eis'?key.slice(4):key;
-            const notice=await sql(e,'SELECT published FROM notices WHERE url=?',noticeUrl).first();
-            const raw=notice?.published||'';
-            if(/(?:GMT|UTC|Z|[+-]\d{2}:?\d{2})$/i.test(raw.trim())){
-              const t=Math.floor(Date.parse(raw)/1000);
-              if(Number.isFinite(t)&&t<=ack.result.date)published=t;
-            }
-          }
-          changes.push(sql(e,'INSERT OR IGNORE INTO delivery_observations VALUES(?,?,?,?,?)',m.id,source,m.created,ack.result.date,published));
-        }
-        await e.DB.batch(changes);
-      }
+    const result=await telegramResult(r);
+    if(result.state==='failed'){
+      await sql(e,"UPDATE outbox SET state='failed' WHERE id=? AND state='uncertain'",m.id).run();
     }
+    if(result.state!=='sent')continue;
+    const ack=result.ack;
+    const changes=[sql(e,"UPDATE outbox SET state='sent',message_id=? WHERE id=?",ack.message_id,m.id)];
+    const key=String(m.dedupe);
+    const source=key.startsWith('eis/')?'eis':key.startsWith('b2b/')?'b2b':key.startsWith('https://')?'catalogue':null;
+    if(source && Number.isSafeInteger(ack.date)){
+      let published=null;
+      const noticeUrl=source==='b2b'?String(payload.text||'').trim().split('\n').pop():source==='eis'?key.slice(4):key;
+      const notice=await sql(e,'SELECT published FROM notices WHERE url=?',noticeUrl).first();
+      const raw=notice?.published||'';
+      if(/(?:GMT|UTC|Z|[+-]\d{2}:?\d{2})$/i.test(raw.trim())){
+        const t=Math.floor(Date.parse(raw)/1000);
+        if(Number.isFinite(t)&&t<=ack.date)published=t;
+      }
+      changes.push(sql(e,'INSERT OR IGNORE INTO delivery_observations VALUES(?,?,?,?,?)',m.id,source,m.created,ack.date,published));
+    }
+    await e.DB.batch(changes);
   }
 }
 async function checkWatchedRzd(e:Env){
@@ -407,7 +424,8 @@ async function telegram(req:Request,e:Env){
       const usage=await sql(e,"SELECT total,background FROM scan_usage WHERE day=date('now')").first();
       const budget=scanBudget(e);
       const sample=await deliveryStats(e);
-      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nСбой или неподтверждённая доставка: '+(failures?.n||0)+'\nКарточек ожидают Mac: '+cards?.n+'\nВозраст старейшей задачи разбора или КП, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(sample?.publication_p95_seconds!=null?Math.ceil(sample.publication_p95_seconds/60)+' мин':'нет данных')+'\nОчередь → Telegram: '+(sample?.queued||0)+' наблюдений, P95: '+(sample?.queue_p95_seconds!=null?sample.queue_p95_seconds+' с':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';break;
+      const deliveryErrors=await sql(e,"SELECT count(CASE WHEN state='failed' THEN 1 END) AS failed,count(CASE WHEN state='uncertain' THEN 1 END) AS uncertain FROM outbox WHERE created>=unixepoch()-604800 AND state IN ('failed','uncertain')").first();
+      reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nСбой или неподтверждённая доставка: '+(failures?.n||0)+'\nСообщения за 7 дней: отказов Telegram '+(deliveryErrors?.failed||0)+', без подтверждения '+(deliveryErrors?.uncertain||0)+'\nКарточек ожидают Mac: '+cards?.n+'\nВозраст старейшей задачи разбора или КП, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(sample?.publication_p95_seconds!=null?Math.ceil(sample.publication_p95_seconds/60)+' мин':'нет данных')+'\nОчередь → Telegram: '+(sample?.queued||0)+' наблюдений, P95: '+(sample?.queue_p95_seconds!=null?sample.queue_p95_seconds+' с':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';break;
     }
     case '/semantic':{
       if(!e.AI){reply='Бесплатная модель поиска пока не подключена.';break;}
@@ -506,15 +524,17 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const locked=await sql(e,"UPDATE jobs SET state='uncertain' WHERE id=? AND state='running' AND lease=? AND until_ts>=unixepoch() AND EXISTS(SELECT 1 FROM lots WHERE lots.id=jobs.lot AND lots.revision=jobs.revision) AND NOT EXISTS(SELECT 1 FROM decisions WHERE decisions.lot=jobs.lot AND decisions.revision=jobs.revision) RETURNING id",id,lease).first();
     if(!locked)return response({},409);
     const form=new FormData();form.set('chat_id',job.owner);form.set('document',blob,'KP.pdf');form.set('caption','Предложение для проверки и ручной подачи.');
-    const sent=await fetch('https://api.telegram.org/bot'+e.BOT_TOKEN+'/sendDocument',{method:'POST',body:form});
-    const delay=await retryDelay(sent);
+    const sent=await telegramSend(e,'sendDocument',form);
+    const delay=sent?await retryDelay(sent):null;
     if(delay!==null){
       await e.DB.batch([cooldown(e,delay),sql(e,"UPDATE jobs SET state='queued',until_ts=unixepoch()+?,lease=NULL,attempts=max(0,attempts-1) WHERE id=? AND lease=? AND state='uncertain'",delay,id,lease)]);
       return response({deferred:true},202);
     }
-    if(!sent.ok)return response({},502);
-    const ack=await sent.json() as any;
-    if(ack?.ok!==true||!Number.isSafeInteger(ack.result?.message_id))return response({},502);
+    const result=await telegramResult(sent);
+    if(result.state==='failed'){
+      await sql(e,"UPDATE jobs SET state='failed',lease=NULL WHERE id=? AND lease=? AND state='uncertain'",id,lease).run();
+    }
+    if(result.state!=='sent')return response({},502);
     await e.DB.batch([sql(e,"UPDATE jobs SET state='done' WHERE id=?",id),sql(e,"INSERT INTO offers(lot,revision,digest,state) VALUES(?,?,?,'отправлено владельцу')",job.lot,job.revision,job.op.slice(4))]);return response({});
   }
   const body=await req.json() as any;
@@ -616,8 +636,8 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     if(typeof body.text!=='string'||body.text.length>3500)return response({},400);
     const args=[body.id,body.lease];
     const [notification]=await e.DB.batch([
-      sql(e,"INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT 'job/'||j.id,o.id,? FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision CROSS JOIN owner o WHERE j.id=? AND j.lease=? AND j.state='running' AND j.until_ts>=unixepoch()",JSON.stringify({text:body.text}),...args),
-      sql(e,"UPDATE jobs SET state='done' WHERE id=? AND lease=? AND until_ts>=unixepoch()",...args)
+      sql(e,"INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT 'job/'||j.id,o.id,? FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision CROSS JOIN owner o WHERE j.id=? AND j.lease=? AND j.op='analysis' AND j.state='running' AND j.until_ts>=unixepoch()",JSON.stringify({text:body.text}),...args),
+      sql(e,"UPDATE jobs SET state='done' WHERE id=? AND lease=? AND op='analysis' AND state='running' AND until_ts>=unixepoch() AND EXISTS(SELECT 1 FROM lots WHERE lots.id=jobs.lot AND lots.revision=jobs.revision)",...args)
     ]);
     if(notification.meta.changes>0)await dispatchQueued(e,ctx);
     return response({});

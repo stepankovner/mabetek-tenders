@@ -89,6 +89,15 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    const retried=await agent('claim',{});
    assert.equal(retried.id,pdfJob.id);
    headers['x-lease']=retried.lease;
+   await agent('result',{id:retried.id,lease:retried.lease,text:'не результат разбора'});
+   assert.equal(db.prepare('SELECT state FROM jobs WHERE id=?').get(retried.id).state,'running');
+   global.fetch=async()=>Response.json({ok:false,error_code:400},{status:400});
+   assert.equal((await call('/agent/pdf',pdf,headers)).status,502);
+   assert.equal(db.prepare('SELECT state FROM jobs WHERE id=?').get(retried.id).state,'failed');
+   global.fetch=transport;
+   await talk(approval.reply_markup.inline_keyboard[0][0].callback_data);
+   const confirmedAgain=await agent('claim',{});
+   headers['x-lease']=confirmedAgain.lease;
    assert.equal((await call('/agent/pdf',pdf,headers)).status,200);
    assert.equal(docs.length,2);
    assert.equal((await call('/agent/pdf',pdf,headers)).status,409);
@@ -513,10 +522,16 @@ test('Очередь соблюдает retry_after и не повторяет �
   assert.equal(db.prepare("SELECT count(*) n FROM outbox WHERE state='ready'").get().n,2);
   assert.ok(db.prepare('SELECT until_ts-unixepoch() remaining FROM telegram_cooldown').get().remaining>=34);
   db.exec('UPDATE telegram_cooldown SET until_ts=0');
-  global.fetch=async()=>{calls++;return calls===2?new Response(null,{status:502}):Response.json({ok:true,result:{message_id:calls}})};
+  global.fetch=async()=>{
+    calls++;
+    if(calls===2)throw new Error('network disconnected');
+    if(calls===3)return Response.json({ok:false,error_code:400},{status:400});
+    return Response.json({ok:true,result:{message_id:calls}});
+  };
   await talk(103);await talk(104);
   assert.equal(db.prepare("SELECT state FROM outbox WHERE dedupe='update/101'").get().state,'uncertain');
-  assert.equal(db.prepare("SELECT count(*) n FROM outbox WHERE state='sent'").get().n,3);
+  assert.equal(db.prepare("SELECT state FROM outbox WHERE dedupe='update/102'").get().state,'failed');
+  assert.equal(db.prepare("SELECT count(*) n FROM outbox WHERE state='sent'").get().n,2);
  }finally{db.close();global.fetch=original}
 });
 
