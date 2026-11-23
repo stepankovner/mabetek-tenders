@@ -69,6 +69,10 @@ def read_card(block, registry):
     if original_number(url, registry) != number:
         raise ValueError("Номер оригинала ЕИС не совпал с выдачей")
     status = field(block, "registry-entry__header-mid__title")
+    if status.casefold() == "определение поставщика завершено":
+        # EIS may omit the subject of a completed procedure. Its original
+        # number still counts as a recognized row, so pagination can advance.
+        return dict(procedure=number, status=status)
     title = field(block, "registry-entry__body-value")
     if not status or not title:
         raise ValueError("Нет предмета или статуса закупки ЕИС")

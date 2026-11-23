@@ -3,6 +3,14 @@ from agent.eis_catalogue import parse
 
 
 class EIS(unittest.TestCase):
+    def test_closed_row_without_subject_does_not_block_pagination(self):
+        block = '''<div class="search-registry-entry-block box">
+        <span class="registry-entry__header-mid__number"><a href="/epz/order/notice/ezt20/view/common-info.html?regNumber=0191100003326000037">№ 0191100003326000037</a></span>
+        <span class="registry-entry__header-mid__title">Определение поставщика завершено</span>'''
+        rejected = []
+        self.assertEqual(parse(block, 'orders', rejected=rejected), [])
+        self.assertEqual(rejected, [])
+
     def test_past_deadline_overrides_stale_active_status_in_both_registries(self):
         from datetime import date
         for registry, path, number, status, label, dates in (
