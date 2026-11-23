@@ -44,6 +44,20 @@ async function checkAgentHealth(e:Env){
   await sql(e,"INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,o.id,? FROM owner o CROSS JOIN agent_state a WHERE a.id=1 AND a.seen=? AND a.paused=0 AND a.seen<=unixepoch()-1200",
     'mac-offline/'+agent.seen,JSON.stringify({text:'Mac не выходит на связь более 20 минут. Сбор с Mac и подготовка документов задержаны. Облачный поиск продолжает работу на доступных площадках. Проверьте, что Mac включён, подключён к сети и выполнен вход в macOS. Состояние: /status.'}),agent.seen).run();
 }
+const eisHealthSources = {
+  'eis-orders':'ЕИС · закупки',
+  'eis-price_requests':'ЕИС · запросы цен',
+};
+async function checkEisHealth(e:Env){
+  const prefix='eis-offline/';
+  for(const [source,label] of Object.entries(eisHealthSources)){
+    await sql(e,`INSERT OR IGNORE INTO outbox(dedupe,owner,payload)
+      SELECT ?||s.id||'/'||s.last_ok,o.id,? FROM sources s CROSS JOIN owner o
+      JOIN agent_state a ON a.id=1
+      WHERE s.id=? AND s.last_ok<=unixepoch()-2700 AND a.paused=0 AND a.seen>unixepoch()-180`,
+      prefix,JSON.stringify({text:label+': более 45 минут без полного обхода. Возможны пропуски новых извещений. Статус: /status.'}),'mac/'+source).run();
+  }
+}
 async function deliveryStats(e:Env) {
   // Keep historical imports separate from notices published inside the observation window.
   return sql(e,`WITH recent AS (
@@ -916,8 +930,25 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const error=partialReason?'Частичный обход. '+partialReason:
       id==='rts-rzd-search' && body.reason==='rts_public_search_unavailable'
         ? 'РТС вернула HTTP 503 и страницу Anti-DDoS' : 'Ошибка обхода на Mac';
-    await sql(e,'INSERT INTO sources(id,url,last_ok,last_error) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_ok=coalesce(excluded.last_ok,sources.last_ok),last_error=excluded.last_error',
-      'mac/'+id,localSources[id].page,body.ok?now():null,body.ok?null:error).run();
+    const source='mac/'+id;
+    const updates:Statement[]=[];
+    if(body.ok&&Object.hasOwn(eisHealthSources,id)){
+      const previous=await sql(e,'SELECT last_ok FROM sources WHERE id=?',source).first();
+      if(previous?.last_ok){
+        const episode=source+'/'+previous.last_ok;
+        const offline='eis-offline/'+episode;
+        updates.push(sql(e,`INSERT OR IGNORE INTO outbox(dedupe,owner,payload)
+          SELECT ?,o.id,? FROM owner o JOIN sources s ON s.id=? AND s.last_ok=?
+          WHERE EXISTS (SELECT 1 FROM outbox WHERE dedupe=? AND state IN ('sent','uncertain'))`,
+          'eis-online/'+episode,JSON.stringify({text:localSources[id].name+': полный обход снова проходит. Статус: /status.'}),
+          source,previous.last_ok,offline),
+          sql(e,"UPDATE outbox SET state='suppressed' WHERE dedupe=? AND state='ready'",offline));
+      }
+    }
+    updates.push(sql(e,'INSERT INTO sources(id,url,last_ok,last_error) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET last_ok=coalesce(excluded.last_ok,sources.last_ok),last_error=excluded.last_error',
+      source,localSources[id].page,body.ok?now():null,body.ok?null:error));
+    const result=await e.DB.batch(updates);
+    if(updates.length>1&&result[0].meta.changes>0)await dispatchQueued(e,ctx);
     return response({ok:true});
   }
   if(['/agent/eat-candidate','/agent/comita-candidate','/agent/rts-candidate','/agent/otc-region-candidate','/agent/eis-candidate'].includes(path)){
@@ -1028,5 +1059,5 @@ export default {
     if(path.startsWith('/agent/'))return agent(req,e,path,ctx);
     return response({},404);
   },
-  async scheduled(_event:unknown,e:Env){await checkAgentHealth(e);const admitted=await pollAll(e,true);await deliver(e);if(admitted)await rankNotices(e);}
+  async scheduled(_event:unknown,e:Env){await checkAgentHealth(e);await checkEisHealth(e);const admitted=await pollAll(e,true);await deliver(e);if(admitted)await rankNotices(e);}
 };

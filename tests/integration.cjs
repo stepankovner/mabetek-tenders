@@ -850,3 +850,33 @@ test('Document queue retains old unchecked work and prefers it to newer or recur
    assert.equal(db.prepare("SELECT count(*) AS n FROM document_tasks WHERE key='prunable'").get().n,0);
  }finally{db.close();}
 });
+
+
+test('A stale EIS registry alerts once while Mac is online and announces the next successful scan',async()=>{
+ const {db,env}=fixture();
+ const previous=global.fetch;
+ const sent=[];
+ global.fetch=async(url,options)=>{
+   if(String(url).includes('api.telegram.org')&&String(url).endsWith('/sendMessage')){
+     sent.push(JSON.parse(options.body).text);
+     return Response.json({ok:true,result:{message_id:sent.length,date:Math.floor(Date.now()/1000)}});
+   }
+   return new Response('',{status:503});
+ };
+ try{
+   env.SCAN_DAILY_LIMIT='0';
+   db.exec(`INSERT INTO owner(id) VALUES('1');
+    INSERT INTO sources(id,url,last_ok,last_error) VALUES
+    ('mac/eis-orders','https://zakupki.gov.ru/',unixepoch()-2800,'Частичный обход');
+    UPDATE agent_state SET seen=unixepoch();`);
+   await worker.scheduled({},env);
+   await worker.scheduled({},env);
+   assert.deepEqual(sent.map(text=>text.includes('45 минут')),[true]);
+   const post=()=>worker.fetch(new Request('https://example.test/agent/scan-report',{method:'POST',
+     headers:{Authorization:'Bearer '+env.AGENT_KEY},body:JSON.stringify({source:'eis-orders',ok:true})}),env);
+   assert.equal((await post()).status,200);
+   assert.equal((await post()).status,200);
+   assert.equal(sent.length,2);
+   assert.match(sent[1],/полный обход снова проходит/);
+ }finally{global.fetch=previous;db.close();}
+});
