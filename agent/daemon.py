@@ -89,6 +89,83 @@ _collectors_paused = None
 _publication_thread = None
 _maintenance_thread = None
 _maintenance_due = 0
+_document_thread = None
+_document_due = 0
+_document_turn = 0
+
+
+def schedule_documents(conf):
+    import threading
+    global _document_thread, _document_due
+    if time.monotonic() < _document_due or (_document_thread and _document_thread.is_alive()):
+        return
+    _document_due = time.monotonic() + 240
+    _document_thread = threading.Thread(target=inspect_background, args=(conf,), daemon=True)
+    _document_thread.start()
+
+
+def inspect_background(conf):
+    global _document_turn
+    from .procurement_documents import inspect
+    try:
+        _document_turn += 1
+        task = request(conf, "document-claim", {"discovery":_document_turn % 3 == 0})
+        if not task:
+            return
+        try:
+            report, _ = inspect(task["url"])
+        except (OSError, ValueError, LookupError):
+            report = {}
+        request(conf, "document-result", {**report, "key":task["key"], "lease":task["lease"]})
+    except (OSError, ValueError) as error:
+        print(time.strftime("%Y-%m-%d %H:%M:%S"), "Документы закупок:",
+              type(error).__name__, file=sys.stderr, flush=True)
+
+
+def verify_release(conf, job, data, *, form=False):
+    from .customer_forms import approved_values
+    from .procurement_documents import inspect
+    try:
+        selected = data["form"]["url"] if form else None
+        report, output = inspect(job["card"]["url"], parse=False, selected=selected,
+                                 values=approved_values(data["terms"]) if form else None)
+    except (OSError, ValueError, LookupError):
+        report, output = {}, None
+    proof = request(conf, "document-proof", {**report, "id":job["id"], "lease":job["lease"]})
+    return bool(proof.get("current")), report, output
+
+
+def send_form(conf, job, data):
+    current, _, output = verify_release(conf, job, data, form=True)
+    if not current:
+        return
+    from .customer_forms import approved_values
+    approved = approved_values(data["terms"])
+    fields = data["form"]["fields"]
+    filled = [item["label"] for item in fields if item["fillable"] and approved.get(item["field"])]
+    manual = [item["label"] for item in fields if not item["fillable"] or not approved.get(item["field"])]
+    if output:
+        notes = "Черновик для проверки. Перенесены: " + ", ".join(dict.fromkeys(filled)) + "."
+        if manual:
+            notes += " Проверьте или заполните вручную: " + ", ".join(dict.fromkeys(manual)) + "."
+        notes = notes[:790] + " Проверьте реквизиты, подпись и приложения."
+    else:
+        notes = "В исходном бланке не удалось однозначно заполнить поля. Используйте значения из сводки и сверьте форму вручную."
+    boundary = uuid4().hex
+    content = f'--{boundary}\r\nContent-Disposition: form-data; name="notes"\r\n\r\n'.encode() + notes.encode()
+    if output:
+        name, file = output
+        suffix = Path(name).suffix.lower()
+        content += (f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="draft{suffix}"\r\n'
+                    'Content-Type: application/octet-stream\r\n\r\n').encode() + file
+    content += f"\r\n--{boundary}--\r\n".encode()
+    upload = urllib.request.Request(conf["worker"].rstrip("/") + "/agent/form", content, {
+        "User-Agent": USER_AGENT, "Authorization": "Bearer " + conf["key"],
+        "x-job": str(job["id"]), "x-lease": job["lease"],
+        "Content-Type": "multipart/form-data; boundary=" + boundary,
+    })
+    with urllib.request.build_opener(NoRedirect()).open(upload, timeout=50) as result:
+        result.read()
 
 PUBLICATIONS = {
     'eat-inbox.sqlite': 'eat-candidate',
@@ -271,6 +348,7 @@ def tick(conf):
     if _collectors_paused:return
     schedule_publications(conf)
     schedule_catalogues(conf)
+    schedule_documents(conf)
     job=request(conf,"claim",{})
     if not job:
         from .sources import poll_fallback, fetch_lot_card
@@ -292,24 +370,35 @@ def tick(conf):
                       lambda result: request(conf, 'catalogue', result), status.get('rosneftPage', 1))
         return
     card=job["card"]
+    if job["op"].startswith("form/"):
+        send_form(conf, job, json.loads(job["input"]))
+        return
     if job["op"].startswith("pdf/"):
         with tempfile.TemporaryDirectory() as td:
             out=Path(td)/"offer.pdf"
-            terms=json.loads(job["input"])
+            data=json.loads(job["input"])
+            terms=data.get("terms") if data.get("documentDigest") else data
             demo=any("демонстрацион" in str(terms.get(k,"")).lower() for k in ("terms","dates","validity","vat"))
             original = None
+            if data.get("documentDigest"):
+                current, report, _ = verify_release(conf, job, data)
+                if not current:
+                    return
+                if card.get('source') == 'eis-order':
+                    original = report["html"]
             if card.get('source') == 'eis-order':
                 from .eis_catalogue import read_order
-                try:
-                    original, returned = read_order(card['url'])
-                except (OSError, ValueError):
-                    if job.get('attempts', 0) < 4:
-                        raise
-                    original = ''
-                else:
-                    if returned != card['url']:
-                        # A changed original URL must be reviewed through /watch before issue.
+                if original is None:
+                    try:
+                        original, returned = read_order(card['url'])
+                    except (OSError, ValueError):
+                        if job.get('attempts', 0) < 4:
+                            raise
                         original = ''
+                    else:
+                        if returned != card['url']:
+                            # A changed original URL must be reviewed through /watch before issue.
+                            original = ''
             pdf = None
             if original != '':
                 render(terms,out,template=conf["template"],demo=demo)
@@ -319,15 +408,28 @@ def tick(conf):
             with urllib.request.build_opener(NoRedirect()).open(req,timeout=50) as res:res.read()
         return
     evidence=""
-    if card.get("source") in ("rzd-rts", "eis-order"):
-        from . import eis_documents, rzd_documents
-        reviewer = eis_documents if card["source"] == "eis-order" else rzd_documents
+    report=None
+    if card.get("source") == "eis-order":
+        from .procurement_documents import inspect
         try:
-            evidence=reviewer.review(card,CONFIG.parent/"documents")
+            report, _ = inspect(card["url"])
+            evidence = "\n".join([*(p["quote"] for p in report["places"]),
+                                   *(p["quote"] for p in report["services"][:3]), *report["notes"]])
+            if not evidence:
+                evidence = "В прочитанных приложениях точное место и профильные работы не найдены."
+        except (OSError, ValueError):
+            evidence = "Оригинал с приложениями недоступен."
+    elif card.get("source") == "rzd-rts":
+        from . import rzd_documents
+        try:
+            evidence=rzd_documents.review(card,CONFIG.parent/"documents")
         except (OSError,ValueError):
             evidence="Оригинал с приложениями недоступен."
     result=analysis_message(card,evidence)
-    request(conf,"result",dict(id=job["id"],lease=job["lease"],text=result[:3500]))
+    payload=dict(id=job["id"],lease=job["lease"],text=result[:3500])
+    if report is not None:
+        payload["report"]=report
+    request(conf,"result",payload)
 
 def install():
     settings()

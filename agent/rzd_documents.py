@@ -23,6 +23,7 @@ class Table(HTMLParser):
         self.cells = None
         self.links = []
         self.files = {}
+        self.unresolved = False
 
     def handle_starttag(self, tag, attrs):
         if tag == 'tr':
@@ -31,6 +32,8 @@ class Table(HTMLParser):
             url = dict(attrs).get('href') or ''
             if FILE_URL.fullmatch(url):
                 self.links.append(url)
+            elif "rts-tender.ru/files/" in url and "FileDownloadHandler" in url:
+                self.unresolved = True
 
     def handle_data(self, data):
         if self.cells is not None and data.strip():
@@ -38,14 +41,18 @@ class Table(HTMLParser):
 
     def handle_endtag(self, tag):
         if tag == 'tr' and self.cells is not None:
-            names = [s for s in self.cells if EXT.search(s)]
+            names = [s for s in self.cells if re.search(r"\.[a-z0-9]{1,8}$", s, re.I)]
             if len(names) == len(self.links) == 1:
                 self.files[self.links[0]] = Path(names[0]).name
+            elif self.links:
+                self.unresolved = True
             self.cells = None
 
-def attachment_links(html):
+def attachment_links(html, *, strict=False):
     table = Table()
     table.feed(html)
+    if strict and table.unresolved:
+        raise ValueError("РЖД не подтвердила полный список приложений")
     return [(name, url) for url, name in table.files.items()]
 
 class NoRedirect(HTTPRedirectHandler):

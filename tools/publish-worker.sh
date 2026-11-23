@@ -15,7 +15,7 @@ if ! grep -Eq 'env\.DB \(mabetek-tenders\)' <<<"$preview" || ! grep -Eq 'env\.AI
   echo "Wrangler не подтвердил привязки D1 и AI. Выпуск остановлен." >&2
   exit 1
 fi
-for migration in migrations/000{3,4,5,6}.sql; do
+for migration in migrations/000{3,4,5,6,7}.sql; do
   "${wrangler[@]}" d1 execute mabetek-tenders --remote --yes --file "$migration" >&2
 done
 "${wrangler[@]}" "${deploy[@]}" >&2

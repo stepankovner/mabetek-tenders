@@ -27,6 +27,10 @@ function fixture(){
     prepare:wrap,batch:async(q)=>{db.exec('BEGIN');try{const results=[];for(const st of q)results.push({meta:await st.run()});db.exec('COMMIT');return results;}catch(e){db.exec('ROLLBACK');throw e;}}
   }}};
 }
+function documentReport(url,html,files=[],extra={}){
+  const digest=crypto.createHash('sha256').update(JSON.stringify(files.map(f=>[f.name,f.url,f.sha256]))).digest('hex');
+  return {url,html,files,digest,complete:true,parsed:true,places:[],services:[],forms:[],notes:[],...extra};
+}
 test('Telegram, D1, очередь Mac и возврат PDF; повтор, изменение, приватность',async()=>{
  const {db,env}=fixture();
  const sent=[],docs=[];
@@ -87,10 +91,20 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    assert.match(docs[0].get('caption'),/НДС перенесена/);
    await talk(word);
    assert.equal(docs.length,1);
-   await talk(approval.reply_markup.inline_keyboard[0][0].callback_data);
+   const approvalButton=approval.reply_markup.inline_keyboard[0][0].callback_data;
+   await talk(approvalButton);
+   assert.match(sent.at(-1).text,/полная сверка приложений/);
+   const reviewTask=await agent('document-claim',{});
+   const report=documentReport(card,await (await global.fetch(card)).text(),[
+     {url:'https://223.rts-tender.ru/files/FileDownloadHandler.ashx?FileGuid=364e6c01-2acd-4dd3-b3fa-18140140ffb7',name:'Извещение.doc',sha256:'a'.repeat(64)}]);
+   await agent('document-result',{...reviewTask,...report});
+   await talk(approvalButton);
    const pdfJob=await agent('claim',{});assert.match(pdfJob.op,/^pdf\//);
    const pdf=Buffer.from('%PDF-1.7\nfixture');
    const headers={Authorization:'Bearer '+env.AGENT_KEY,'x-job':String(pdfJob.id),'x-lease':pdfJob.lease};
+   const prove=async job=>assert.deepEqual(await agent('document-proof',{...report,id:job.id,lease:job.lease}),{current:true});
+   assert.equal((await call('/agent/pdf',pdf,headers)).status,409);
+   await prove(pdfJob);
    const transport=global.fetch;
    global.fetch=async()=>Response.json({ok:false,error_code:429,parameters:{retry_after:35}},{status:429});
    assert.equal((await call('/agent/pdf',pdf,headers)).status,202);
@@ -100,6 +114,7 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    const retried=await agent('claim',{});
    assert.equal(retried.id,pdfJob.id);
    headers['x-lease']=retried.lease;
+   await prove(retried);
    await agent('result',{id:retried.id,lease:retried.lease,text:'не результат разбора'});
    assert.equal(db.prepare('SELECT state FROM jobs WHERE id=?').get(retried.id).state,'running');
    global.fetch=async()=>Response.json({ok:false,error_code:400},{status:400});
@@ -109,6 +124,7 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    await talk(approval.reply_markup.inline_keyboard[0][0].callback_data);
    const confirmedAgain=await agent('claim',{});
    headers['x-lease']=confirmedAgain.lease;
+   await prove(confirmedAgain);
    assert.equal((await call('/agent/pdf',pdf,headers)).status,200);
    assert.equal(docs.length,2);
    assert.equal((await call('/agent/pdf',pdf,headers)).status,409);
@@ -527,6 +543,10 @@ test('Telegram opens EIS through Mac and requires a freshly verified original be
    assert.equal((await agent('card-result',{...task,html,resolved_url:url.replace(procedure,'0322200001326000256')})).status,400);
    assert.equal((await agent('card-result',{...task,html})).status,200);
    assert.match(sent.at(-1).text,/Заказчик из оригинала/);
+   const reviewTask=await (await agent('document-claim',{})).json();
+   const report=documentReport(url,html);
+   await agent('document-result',{...reviewTask,...report});
+   await Promise.all(pending);
    const terms=sent.at(-1).reply_markup.inline_keyboard.flat().find(item=>item.text==='Уточнить условия');
    await talk(terms.callback_data);
    for(const input of [title,'1','вагон','100','Без НДС','8 декабря','После акта','1 декабря','1'])await talk(input);
@@ -535,6 +555,8 @@ test('Telegram opens EIS through Mac and requires a freshly verified original be
    const job=await (await agent('claim',{})).json();
    const pdf=Buffer.from('%PDF-1.7\nfixture');
    const headers={'x-job':String(job.id),'x-lease':job.lease};
+   assert.equal((await agent('pdf',pdf,headers)).status,409);
+   await agent('document-proof',{...report,id:job.id,lease:job.lease});
    assert.equal((await agent('pdf',pdf,headers)).status,400);
    const files=content=>{
      const form=new FormData();
@@ -548,6 +570,7 @@ test('Telegram opens EIS through Mac and requires a freshly verified original be
    assert.match(sent.at(-1).text,/КП не отправлено/);
    await talk(confirm);
    const retry=await (await agent('claim',{})).json();
+   await agent('document-proof',{...report,id:retry.id,lease:retry.lease});
    assert.equal((await agent('pdf',files(html),{'x-job':String(retry.id),'x-lease':retry.lease})).status,200);
    assert.equal(documents.length,1);
  }finally{db.close();global.fetch=original;}
@@ -701,4 +724,97 @@ test('Mac outage is reported once, recovery resumes and long status keeps all so
     await worker.scheduled({},env);
     assert.equal(sent.length,count);
   }finally{global.fetch=original;db.close();}
+});
+
+test('Фоновый документ находит общий заголовок, форма сохраняет согласованные значения, смена файла отзывает версию',async()=>{
+  const {db,env}=fixture(),sent=[],deliveries=[];
+  const fetchBefore=global.fetch;
+  const id='0322200001326000255';
+  const url='https://zakupki.gov.ru/epz/order/notice/zk20/view/common-info.html?regNumber='+id;
+  const file={url:'https://zakupki.gov.ru/44fz/filestore/public/1.0/download/priz/file.html?uid='+'A'.repeat(32),
+    name:'Форма предложения.docx',sha256:'a'.repeat(64)};
+  const html='<span class="cardMainInfo__purchaseLink">№ '+id+'</span>'+
+    '<span class="cardMainInfo__state">Подача заявок</span>'+
+    '<span class="cardMainInfo__title">Объект закупки</span><span class="cardMainInfo__content">Оказание услуг</span>'+
+    '<span class="cardMainInfo__title">Заказчик</span><span class="cardMainInfo__content">Покупатель</span>'+
+    '<span class="section__title">Дата и время окончания срока подачи заявок</span><span class="section__info">07.12.2099 11:00 (МСК+7)</span>';
+  const detail={
+    places:[{file:file.name,quote:file.name+', абзац 8: Место выполнения работ: Хабаровск, ул. Ленина, 1.'}],
+    services:[{file:file.name,location:'абзац 7',quote:'Предмет договора: выгрузка вагонов.'}],
+    forms:[{...file,fields:[{field:'lot',label:'Номер лота',fillable:true},
+      {field:'manual',label:'Подпись',fillable:false}]}]
+  };
+  const report=documentReport(url,html,[file],detail);
+  const agent=(path,body,headers={})=>worker.fetch(new Request('https://test.invalid/agent/'+path,{
+    method:'POST',headers:{Authorization:'Bearer '+env.AGENT_KEY,...headers},body:body instanceof FormData?body:JSON.stringify(body)
+  }),env);
+  const json=async (path,body)=>(await agent(path,body)).json();
+  let update=0;
+  const talk=text=>worker.fetch(new Request('https://test.invalid/telegram',{method:'POST',
+    headers:{'X-Telegram-Bot-Api-Secret-Token':env.WEBHOOK_SECRET},
+    body:JSON.stringify({update_id:++update,message:{chat:{id:1,type:'private'},from:{id:1},text}})}),env);
+  global.fetch=async(link,opts)=>{
+    if(link===url)return new Response(html);
+    if(link.endsWith('/sendMessage'))sent.push(JSON.parse(opts.body));
+    else if(link.endsWith('/sendDocument'))deliveries.push(opts.body);
+    else throw Error('Unexpected network call');
+    return Response.json({ok:true,result:{message_id:sent.length+deliveries.length,date:Math.floor(Date.now()/1000)}});
+  };
+  try{
+    db.exec("INSERT INTO owner(id) VALUES('1')");
+    await json('eis-candidate',{url,procedure:id,title:'Оказание услуг',review:true});
+    assert.equal(sent.length,0); // no title match, no owner click
+    const task=await json('document-claim',{discovery:true});
+    assert.equal(task.url,url);
+    assert.equal((await json('document-result',{...task,...report,digest:'b'.repeat(64)})).retry,true);
+    db.exec('UPDATE document_tasks SET due=0');
+    const conflict=await json('document-claim',{discovery:true});
+    const wrongPlace={file:file.name,quote:file.name+', абзац 10: Место выполнения работ: Владивосток, улица Светланская.'};
+    assert.equal((await json('document-result',{...conflict,...report,places:[...report.places,wrongPlace]})).matched,false);
+    assert.equal(sent.length,0);
+    db.exec('UPDATE document_tasks SET due=0');
+    const retry=await json('document-claim',{discovery:true});
+    assert.equal((await json('document-result',{...retry,...report})).matched,true);
+    assert.match(sent.at(-1).text,/найдена по приложению/);
+    assert.match(sent.at(-1).text,/абзац 7/);
+    assert.equal((await agent('document-result',{...retry,...report})).status,409);
+    await talk('/analyze 1 1');
+    assert.match(sent.at(-1).text,/Подпись/);
+    await talk('/terms 1 1');
+    for(const field of ['Выгрузка вагонов','2','вагон','500','Без НДС','3 декабря','По акту','1 декабря','8'])await talk(field);
+    const confirm=sent.at(-1).reply_markup.inline_keyboard[0][0].callback_data;
+    await talk('/transfer 1 1');
+    const formButton=sent.at(-1).reply_markup.inline_keyboard[0][0].callback_data;
+    assert.match(formButton,/^\/form /);
+    await talk(formButton);
+    const formJob=await json('claim',{});
+    assert.match(formJob.op,/^form\//);
+    const upload=new FormData();
+    upload.set('file',new Blob([Buffer.from('504b0304','hex')]),'draft.docx');
+    upload.set('notes','Черновик. Подпись заполнить вручную.');
+    const headers={'x-job':String(formJob.id),'x-lease':formJob.lease};
+    assert.equal((await agent('form',upload,headers)).status,409);
+    assert.equal((await json('document-proof',{...report,id:formJob.id,lease:formJob.lease})).current,true);
+    assert.equal((await agent('form',upload,headers)).status,200);
+    assert.equal(deliveries.length,1);
+    assert.match(deliveries[0].get('document').name,/Черновик/);
+    await talk(confirm);
+    const pdfJob=await json('claim',{});
+    assert.match(pdfJob.op,/^pdf\//);
+    const next=documentReport(url,html,[{...file,sha256:'b'.repeat(64)}],{parsed:false});
+    assert.equal((await json('document-proof',{...next,id:pdfJob.id,lease:pdfJob.lease})).current,false);
+    assert.equal(db.prepare('SELECT revision FROM lots').get().revision,2);
+    await talk(confirm);
+    assert.match(sent.at(-1).text,/версия изменилась/);
+    assert.equal(db.prepare('SELECT count(*) n FROM answers WHERE revision=2').get().n,0);
+    assert.equal(deliveries.length,1);
+    db.exec('UPDATE document_tasks SET due=0');
+    const deadlineTask=await json('document-claim',{});
+    const amended=html.replace('07.12.2099','08.12.2099');
+    await json('document-result',{...deadlineTask,...next,html:amended,digest:null,complete:false,
+      files:[{...file,sha256:null}],notes:['Файл временно недоступен']});
+    assert.equal(db.prepare('SELECT revision FROM lots').get().revision,3);
+    assert.match(sent.at(-1).text,/Срок:.*08.12.2099/);
+    assert.equal(db.prepare('SELECT digest FROM document_reviews WHERE revision=3').get().digest,null);
+  }finally{global.fetch=fetchBefore;db.close();}
 });

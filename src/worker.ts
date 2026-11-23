@@ -3,6 +3,7 @@ import {rankNotices} from './semantic';
 import {b2b,publicPoll,macCatalogue,noticeStatements,queueEisNotice,confirmLocation} from './monitor';
 import {setup} from './setup';
 import {questions,validate,offer} from './dialog';
+import {documentKey,documentMatch,formSummary,queueDocuments,validatedReview,type Review} from './documents';
 // Cloudflare Worker. Aggregate RSS announcements stay separate from verified lots.
 import { parseCard, pendingCardUrl, readCard } from './card';
 import { authorized, feed, identity, eisTime, eisOrderNumber, rzdTime, publicCatalogues, catalogueMatch } from './core.mjs';
@@ -215,22 +216,64 @@ async function checkWatchedRzd(e:Env){
     await sql(e,'UPDATE sources SET cursor=?,last_error=? WHERE id=?',String(row.id),'Проверка отслеживаемого оригинала РЖД не завершилась',source).run();
   }
 }
-async function saveCard(e:Env,c:any,watchedRevision?:number){
+const requiresDocumentProof=(card:any)=>Boolean(documentKey(card.url));
+async function formSignature(terms:string,digest:string,index:number,form:any){
+  return (await hash(JSON.stringify([terms,digest,index,form]))).slice(0,16);
+}
+function enqueueRelease(e:Env,lot:string,revision:string,op:string,input:any){
+  return sql(e,`INSERT INTO jobs(lot,revision,op,input) VALUES(?,?,?,?)
+    ON CONFLICT(lot,revision,op) DO UPDATE SET input=excluded.input,state='queued',attempts=0,until_ts=0,lease=NULL
+    WHERE jobs.state='failed' OR (jobs.state='running' AND jobs.until_ts<unixepoch() AND jobs.attempts>=4)`,lot,revision,op,JSON.stringify(input));
+}
+function proven(e:Env,job:any,lease:any,digest:string){
+  return sql(e,`SELECT 1 FROM document_proofs p JOIN document_reviews d ON d.lot=? AND d.revision=?
+    WHERE p.job=? AND p.lease=? AND p.digest=? AND d.digest=p.digest AND p.checked>=unixepoch()-180`,job.lot,job.revision,job.id,lease,digest).first();
+}
+async function sameReview(report:Review|null){
+  if(!report)return false;
+  if(!report.complete)return true;
+  const digest=await hash(JSON.stringify(report.files.map(f=>[f.name,f.url,f.sha256])));
+  return report.digest===digest;
+}
+async function savedReview(e:Env,lot:number,revision:number):Promise<Review|null>{
+  const row=await sql(e,'SELECT report FROM document_reviews WHERE lot=? AND revision=?',lot,revision).first();
+  return row?JSON.parse(row.report):null;
+}
+function reviewStatement(e:Env,key:string,revision:number,review:Review){
+  return sql(e,`INSERT INTO document_reviews(lot,revision,digest,report)
+    SELECT id,?,?,? FROM lots WHERE canonical=? AND revision=?
+    ON CONFLICT(lot,revision) DO UPDATE SET digest=excluded.digest,report=excluded.report,checked=unixepoch()`,
+    revision,review.digest,JSON.stringify(review),key,revision);
+}
+async function saveCard(e:Env,c:any,watchedRevision?:number,review?:Review,track=true){
   const key=identity(c),payload=JSON.stringify(c),digest=await hash(payload);
   const previous=await sql(e,'SELECT l.id,l.revision,v.digest,v.payload FROM lots l JOIN versions v ON l.id=v.lot AND l.revision=v.revision WHERE l.canonical=?',key).first();
-  if(previous?.digest===digest)return previous;
+  if(watchedRevision!==undefined&&previous?.revision!==watchedRevision)throw Error('Карточка уже обновилась');
+  const oldReview=review&&previous?await savedReview(e,previous.id,previous.revision):null;
+  const documentsChanged=Boolean(oldReview?.digest&&review?.digest&&oldReview.digest!==review.digest);
+  const tracking=track?queueDocuments(e,c.url,true):null;
+  if(previous?.digest===digest&&!documentsChanged){
+    const updates:Statement[]=[];
+    if(tracking)updates.push(tracking);
+    if(review&&(review.complete||!oldReview?.complete))updates.push(reviewStatement(e,key,previous.revision,review));
+    if(updates.length)await e.DB.batch(updates);
+    return previous;
+  }
   const revision=(previous?.revision||0)+1;
   const notifications:Statement[]=[];
-  if(watchedRevision!==undefined){
-    if(previous?.revision!==watchedRevision)throw Error('Карточка уже обновилась');
+  if(previous&&(watchedRevision!==undefined||documentsChanged)){
     const old=JSON.parse(previous.payload);
     const labels:Record<string,string>={title:'Предмет',customer:'Заказчик',status:'Статус',place:'Место',region:'Регион',price:'Цена',deadline:'Срок',registration:'Регистрационный номер'};
     const changes=Object.entries(labels).filter(([key])=>old[key]!==c[key])
       .map(([key,label])=>label+': '+String(old[key]||'не указано').slice(0,120)+' → '+String(c[key]||'не указано').slice(0,120));
     const documents=(card:any)=>(card.documents||[]).map((d:any)=>JSON.stringify([d.name,d.url])).sort();
     if(JSON.stringify(documents(old))!==JSON.stringify(documents(c)))changes.push('Изменился список приложений');
-    if(!changes.length)return previous;
-    const message={text:'Изменение в отслеживаемой закупке РЖД\n'+changes.join('\n')+'\n'+c.url};
+    if(old.documentsPage!==c.documentsPage)changes.push('Изменилась вкладка приложений');
+    if(documentsChanged)changes.push('Изменился состав или содержимое приложений. Предыдущие условия и КП требуют повторной проверки.');
+    if(!changes.length&&!review)return previous;
+    if(!changes.length)changes.push('В оригинале появилась новая редакция. Перепроверьте условия.');
+    const message={text:'Изменение в отслеживаемой закупке\n'+changes.join('\n')+'\n'+c.url,
+      reply_markup:{inline_keyboard:[[{text:'Разобрать новую версию',callback_data:'/analyze '+previous.id+' '+revision}],...decisionKeys(previous.id,revision).inline_keyboard]}};
     notifications.push(sql(e,'INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT ?,id,? FROM owner',
       'revision/'+previous.id+'/'+revision,JSON.stringify(message)));
   }
@@ -240,6 +283,8 @@ async function saveCard(e:Env,c:any,watchedRevision?:number){
     sql(e,'INSERT INTO versions SELECT id,?,?,?,unixepoch() FROM lots WHERE canonical=?',revision,digest,payload,key),
     sql(e,'INSERT OR IGNORE INTO links SELECT id,?,? FROM lots WHERE canonical=?',c.source,c.url,key),
     sql(e,"UPDATE offers SET state='устарело' WHERE lot=(SELECT id FROM lots WHERE canonical=?)",key),
+    ...(review?[reviewStatement(e,key,revision,review)]:[]),
+    ...(tracking?[tracking]:[]),
     ...notifications
   ]);
   return (await sql(e,'SELECT id,revision FROM lots WHERE canonical=?',key).first())!;
@@ -318,6 +363,13 @@ async function telegram(req:Request,e:Env){
       const row=await sql(e,'SELECT x.payload FROM versions x JOIN lots l ON l.id=x.lot AND l.revision=x.revision WHERE x.lot=? AND x.revision=?',id||'',revision||'').first();
       if(!row){reply='Откройте актуальную карточку.';break;}
       const stored=JSON.parse(row.payload);
+      const inspection=await savedReview(e,Number(id),Number(revision));
+      if(inspection?.forms.length){
+        reply='Найденные формы и поля\n\n'+formSummary(inspection);
+        markup={inline_keyboard:[[{text:'Перенос подтверждённых условий',callback_data:'/transfer '+id+' '+revision}],
+          [{text:'Оригинальные документы',url:stored.documentsPage||stored.url}]]};
+        break;
+      }
       if(stored.source==='eis-order'){
         reply=stored.documentsPage?'Вкладка с приложениями на ЕИС. Проверьте актуальный комплект в оригинале.':'Список приложений доступен для проверки в оригинале ЕИС.';
         markup={inline_keyboard:[[{text:stored.documentsPage?'Документы ЕИС':'Оригинал ЕИС',url:stored.documentsPage||stored.url}]]};
@@ -369,7 +421,7 @@ async function telegram(req:Request,e:Env){
       }catch{reply='Оригинал формы не удалось подтвердить. Повторите запрос позже.';}
       break;
     }
-    case '/word':case '/transfer':{
+    case '/form':case '/word':case '/transfer':{
       const [,lot,v]=text.split(' ');
       const row=await sql(e,'SELECT x.payload FROM lots l JOIN versions x ON x.lot=l.id AND x.revision=l.revision WHERE l.id=? AND l.revision=?',lot||'',v||'').first();
       if(!row){reply='Карточка обновилась. Откройте текущую версию.';break;}
@@ -378,6 +430,23 @@ async function telegram(req:Request,e:Env){
         const card=JSON.parse(row.payload);
         const answers=await fields(Number(lot),Number(v)), info=offer(card,answers);
         const signature=(await hash(JSON.stringify(info.data))).slice(0,16);
+        const review=await savedReview(e,Number(lot),Number(v));
+        if(text.startsWith('/form ')){
+          const [, , ,selection,approved]=text.split(' ');
+          const index=Number(selection);
+          const chosen=review?.forms[index];
+          if(!review?.digest||!/^\d+$/.test(selection||'')||!chosen?.fields.some(f=>f.fillable)
+            ||approved!==await formSignature(signature,review.digest,index,chosen)){
+            reply='Форма или условия изменились. Откройте текущую сводку.';break;
+          }
+          const op='form/'+approved;
+          const job=await sql(e,'SELECT state FROM jobs WHERE lot=? AND revision=? AND op=?',lot,v,op).first();
+          if(job?.state==='done'||job?.state==='uncertain'){
+            reply=job.state==='done'?'Этот черновик уже отправлен.':'Проверьте чат: доставка этого черновика не подтверждена.';break;
+          }
+          mutations.push(enqueueRelease(e,lot,v,op,{terms:info.data,documentDigest:review.digest,form:chosen,index}));
+          reply='Черновик бланка в очереди Mac. Перед заполнением агент заново сверит оригинал и приложения.';break;
+        }
         if(text.startsWith('/word ')){
           if(text.split(' ')[3]!==signature || !supportsForm(card)){reply='Откройте актуальную сводку условий.';break;}
           const current=await readCard(card.url);
@@ -391,8 +460,16 @@ async function telegram(req:Request,e:Env){
           reply=draft.filled?'Подготовлен черновик Word со ставкой из ваших условий.':'Подготовлен черновик Word. Требуется ручное заполнение поля НДС.';
           break;
         }
-        if(supportsForm(card))markup={inline_keyboard:[[{text:'Получить черновик формы Word',callback_data:'/word '+lot+' '+v+' '+signature}]]};
-        reply=['Значения для переноса в форму заказчика',info.summary,'Сведения о персонале, согласия и подпись заполняются отдельно.','Оригинал: '+card.url].join('\n');
+        const forms=[];
+        if(review?.digest){
+          for(const [index,form] of review.forms.entries()){
+            if(form.fields.some(f=>f.fillable))forms.push([{text:'Черновик: '+form.name.slice(0,42),
+              callback_data:'/form '+lot+' '+v+' '+index+' '+await formSignature(signature,review.digest,index,form)}]);
+          }
+        }
+        if(supportsForm(card))forms.push([{text:'Получить черновик формы Word',callback_data:'/word '+lot+' '+v+' '+signature}]);
+        if(forms.length)markup={inline_keyboard:forms};
+        reply=['Значения для переноса в форму заказчика',info.summary,review?.forms.length?formSummary(review):'Проверьте бланки в оригинале. Для сохранения структуры доступны только распознанные поля Word и Excel.','Сведения о персонале, согласия и подпись заполняются отдельно.','Оригинал: '+card.url].join('\n\n');
       }catch(err){reply=(err as Error).message;}
       break;
     }
@@ -409,24 +486,53 @@ async function telegram(req:Request,e:Env){
       // For EIS, Mac retries the same official original immediately before rendering if the Worker cannot reach it.
       const macRecheck=card.source==='eis-order'&&current===null&&acceptingCard(card);
       if(!macRecheck&&(!acceptingCard(current)||JSON.stringify(card)!==JSON.stringify(current))){
-        reply='Выпуск остановлен. Срок, статус или актуальность карточки требуют проверки.';break;
+        reply='Выпуск остановлен. Срок, статус или актуальность карточки требуют проверки.';
+        if(current&&identity(current)===identity(card)&&JSON.stringify(card)!==JSON.stringify(current)){
+          const fresh=await saveCard(e,current,Number(v));
+          reply+=' Откройте новую версию и перепроверьте условия.';
+          markup=cardMessage(current,fresh).reply_markup;
+        }
+        break;
+      }
+      const review=requiresDocumentProof(card)?await savedReview(e,Number(id),Number(v)):null;
+      if(requiresDocumentProof(card)&&!review?.digest){
+        const queued=queueDocuments(e,card.url,true,true);
+        if(queued)mutations.push(queued);
+        reply='Перед выпуском нужна полная сверка приложений. Проверьте статус через «Разобрать», затем заново подтвердите сводку.';break;
       }
       const job=await sql(e,'SELECT state FROM jobs WHERE lot=? AND revision=? AND op=?',id,v,'pdf/'+digest).first();
       if(job?.state==='done'){reply='КП с этими условиями уже отправлено в чат.';break;}
       if(job?.state==='uncertain'){reply='Подтверждение доставки PDF не получено. Проверьте историю чата.';break;}
-      mutations.push(sql(e,"INSERT INTO jobs(lot,revision,op,input) VALUES(?,?,?,?) ON CONFLICT(lot,revision,op) DO UPDATE SET state='queued',attempts=0,until_ts=0,lease=NULL WHERE jobs.state='failed' OR (jobs.state='running' AND jobs.until_ts<unixepoch() AND jobs.attempts>=4)",id,v,'pdf/'+digest,JSON.stringify(details.data)));
+      mutations.push(enqueueRelease(e,id,v,'pdf/'+digest,review?.digest?{terms:details.data,documentDigest:review.digest}:details.data));
       reply='Подтверждение принято. PDF в очереди Mac.';break;
     }
     case '/analyze':{
       const [,lot,rev]=text.split(' ');
       const valid=await sql(e,'SELECT id FROM lots WHERE id=? AND revision=?',lot||'',rev||'').first();
       if(!valid){reply='Карточка устарела.';break;}
+      const inspection=await savedReview(e,Number(lot),Number(rev));
+      if(inspection){
+        reply=['Разбор приложений',...inspection.places.map(x=>x.quote),
+          ...inspection.services.slice(0,4).map(x=>x.file+', '+x.location+': '+x.quote),
+          formSummary(inspection),...inspection.notes,
+          inspection.complete?'Состав приложений сверен.':'Состав приложений подтверждён частично.'].filter(Boolean).join('\n');
+        markup={inline_keyboard:[[{text:'Данные для формы заказчика',callback_data:'/transfer '+lot+' '+rev}],...decisionKeys(Number(lot),Number(rev)).inline_keyboard]};
+        if(!inspection.complete||(!inspection.parsed&&!inspection.notes.length)){
+          const row=await sql(e,'SELECT payload FROM versions WHERE lot=? AND revision=?',lot,rev).first();
+          const queued=row&&queueDocuments(e,JSON.parse(row.payload).url,true,true);
+          if(queued)mutations.push(queued);
+        }
+        break;
+      }
       const job=await sql(e,"SELECT state,until_ts,attempts,id FROM jobs WHERE lot=? AND revision=? AND op='analysis'",lot,rev).first();
       if(job?.state==='done'){
         const delivered=await sql(e,'SELECT payload FROM outbox WHERE dedupe=? AND owner=?','job/'+job.id,user).first();
         reply='Разбор готов.'+(delivered?'\n'+JSON.parse(delivered.payload).text:'');break;
       }
       if(job?.state==='running' && job.until_ts>=now()){reply='Mac обрабатывает документы.';break;}
+      const version=await sql(e,'SELECT payload FROM versions WHERE lot=? AND revision=?',lot,rev).first();
+      const priority=version&&queueDocuments(e,JSON.parse(version.payload).url,true,true);
+      if(priority)mutations.push(priority);
       const agent=await sql(e,'SELECT seen,paused FROM agent_state WHERE id=1').first();
       mutations.push(sql(e,"INSERT INTO jobs(lot,revision,op) VALUES(?,?,'analysis') ON CONFLICT(lot,revision,op) DO UPDATE SET state='queued',attempts=0,until_ts=0,lease=NULL WHERE jobs.state='failed' OR (jobs.state='running' AND jobs.until_ts<unixepoch() AND jobs.attempts>=4)",lot,rev));
       if(agent?.paused)reply='Разбор в очереди. Mac на паузе. Возобновить: /resume';
@@ -462,12 +568,15 @@ async function telegram(req:Request,e:Env){
       const count=await sql(e,"SELECT count(*) AS n,min(j.created) AS oldest FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE j.state IN ('queued','running') AND (j.state='queued' OR j.until_ts>=unixepoch() OR j.attempts<4)").first();
       const failures=await sql(e,"SELECT count(*) AS n FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE j.state IN ('failed','uncertain') OR (j.state='running' AND j.until_ts<unixepoch() AND j.attempts>=4)").first();
       const cards=await sql(e,'SELECT count(*) AS n FROM pending_cards').first();
+      const documents=await sql(e,`SELECT count(*) AS n,sum(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) AS errors
+        FROM document_tasks WHERE (watched=1 OR created>=unixepoch()-172800) AND (checked IS NULL OR due<=unixepoch())`).first();
       const usage=await sql(e,"SELECT total,background FROM scan_usage WHERE day=date('now')").first();
       const budget=scanBudget(e);
       const sample=await deliveryStats(e);
       const deliveryErrors=await sql(e,"SELECT count(CASE WHEN state='failed' THEN 1 END) AS failed,count(CASE WHEN state='uncertain' THEN 1 END) AS uncertain FROM outbox WHERE created>=unixepoch()-604800 AND state IN ('failed','uncertain')").first();
       reply=sourceStatus+'\nРЖД: чтение оригинала по ссылке /watch'+'\nMac: '+(a?.seen?new Date(a.seen*1000).toISOString():'контакта ещё не было')+'\nЗадач: '+count?.n+'\nСбой или неподтверждённая доставка: '+(failures?.n||0)+'\nСообщения за 7 дней: отказов Telegram '+(deliveryErrors?.failed||0)+', без подтверждения '+(deliveryErrors?.uncertain||0)+'\nКарточек ожидают Mac: '+cards?.n+'\nВозраст старейшей задачи разбора или КП, с: '+(count?.oldest?now()-count.oldest:0)+'\nДиск Mac, ГБ: '+(a?.free_bytes?Math.floor(a.free_bytes/1e9):'неизвестно')+'\nДоставка за 7 дней: '+(sample?.total||0)+' подтверждено, '+(sample?.dated||0)+' с известным временем публикации. P95: '+(sample?.publication_p95_seconds!=null?Math.ceil(sample.publication_p95_seconds/60)+' мин':'нет данных')+'\nОчередь → Telegram: '+(sample?.queued||0)+' наблюдений, P95: '+(sample?.queue_p95_seconds!=null?sample.queue_p95_seconds+' с':'нет данных')+'\nОбходы проекта сегодня (UTC): '+(usage?.total||0)+' из '+budget.limit+', резерв ручных запусков: '+budget.reserve+'.\nРасход всего аккаунта: нет телеметрии.';
       const local=await localHealth(e);
+      reply+='\nДокументы ожидают фоновой проверки: '+(documents?.n||0)+', с ошибкой: '+(documents?.errors||0);
       if(local)reply+='\nВерсия Mac: '+local.release+'\nНаходок в локальной очереди: '+local.pending+', возраст старейшей, с: '+(local.oldest?Math.max(0,now()-local.oldest):0)+'\nБаз Mac с ошибкой чтения: '+local.unreadable+'\nПоследняя резервная копия: '+(local.backup_at?new Date(local.backup_at*1000).toISOString():'ещё не создана');
       break;
     }
@@ -528,6 +637,20 @@ async function telegram(req:Request,e:Env){
   await deliver(e);return response({});
 }
 type Background = {waitUntil(task:Promise<unknown>):void};
+async function releaseFailure(e:Env,job:any,lease:string,text:string,ctx?:Background){
+  const [notification]=await e.DB.batch([
+    sql(e,`INSERT OR IGNORE INTO outbox(dedupe,owner,payload)
+      SELECT 'release-stale/'||id||'/'||lease,?,? FROM jobs WHERE id=? AND lease=? AND state='running' AND until_ts>=unixepoch()`,
+      job.owner,JSON.stringify({text}),job.id,lease),
+    sql(e,"UPDATE jobs SET state='failed',lease=NULL WHERE id=? AND lease=? AND state='running' AND until_ts>=unixepoch()",job.id,lease)
+  ]);
+  if(notification.meta.changes>0)await dispatchQueued(e,ctx);
+}
+function originalFromReport(body:any,expected:string){
+  if(typeof body?.html!=='string'||body.html.length>3000000||typeof body.url!=='string')return null;
+  if(body.url!==expected&&(!eisOrderNumber(expected)||eisOrderNumber(body.url)!==eisOrderNumber(expected)))return null;
+  try{return parseCard(body.html,body.url);}catch{return null;}
+}
 async function agent(req:Request,e:Env,path:string,ctx?:Background) {
   if(!await same(req.headers.get('Authorization'),'Bearer '+(e.AGENT_KEY||''))||!e.AGENT_KEY)return response({},403);
   if(path==='/agent/check'||path==='/agent/status'){
@@ -544,6 +667,8 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const answers=await sql(e,'SELECT field,value FROM answers WHERE owner=? AND lot=? AND revision=?',job.owner,job.lot,job.revision).all();
     if(!version)return response({},409);
     const card=JSON.parse(version.payload);
+    const documentDigest=JSON.parse(job.input||'{}').documentDigest;
+    if(requiresDocumentProof(card)&&(!documentDigest||!await proven(e,job,lease,documentDigest)))return response({proofRequired:true},409);
     let blob:Blob;
     if(card.source==='eis-order'){
       const form=await req.formData().catch(()=>null);
@@ -561,6 +686,13 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
       if(!(pdf instanceof Blob))return response({},400);
       blob=pdf;
     }else{
+      if(!requiresDocumentProof(card)){
+        const fresh=await readCard(card.url).catch(()=>null);
+        if(!acceptingCard(fresh)||JSON.stringify(card)!==JSON.stringify(fresh)){
+          await releaseFailure(e,job,lease!,'КП не отправлено. Оригинал, статус или срок подачи изменились. Откройте карточку заново через /watch.',ctx);
+          return response({stale:true},409);
+        }
+      }
       blob=await req.blob();
     }
     if(blob.size>8000000 || await blob.slice(0,5).text()!=='%PDF-')return response({},400);
@@ -568,7 +700,7 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     try{approved=offer(card,Object.fromEntries(answers.results.map(r=>[r.field,r.value])));}
     catch{return response({},409);}
     if(job.op!=='pdf/'+await hash(JSON.stringify(approved.data)))return response({},409);
-    const locked=await sql(e,"UPDATE jobs SET state='uncertain' WHERE id=? AND state='running' AND lease=? AND until_ts>=unixepoch() AND EXISTS(SELECT 1 FROM lots WHERE lots.id=jobs.lot AND lots.revision=jobs.revision) AND NOT EXISTS(SELECT 1 FROM decisions WHERE decisions.lot=jobs.lot AND decisions.revision=jobs.revision) RETURNING id",id,lease).first();
+    const locked=await sql(e,"UPDATE jobs SET state='uncertain' WHERE id=? AND state='running' AND lease=? AND until_ts>=unixepoch() AND EXISTS(SELECT 1 FROM lots WHERE lots.id=jobs.lot AND lots.revision=jobs.revision) AND NOT EXISTS(SELECT 1 FROM decisions WHERE decisions.lot=jobs.lot AND decisions.revision=jobs.revision) AND (? IS NULL OR EXISTS(SELECT 1 FROM document_proofs p JOIN document_reviews d ON d.lot=jobs.lot AND d.revision=jobs.revision WHERE p.job=jobs.id AND p.lease=jobs.lease AND p.digest=? AND d.digest=p.digest AND p.checked>=unixepoch()-180)) RETURNING id",id,lease,documentDigest||null,documentDigest||null).first();
     if(!locked)return response({},409);
     const form=new FormData();form.set('chat_id',job.owner);form.set('document',blob,'KP.pdf');form.set('caption','Предложение для проверки и ручной подачи.');
     const sent=await telegramSend(e,'sendDocument',form);
@@ -584,7 +716,126 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     if(result.state!=='sent')return response({},502);
     await e.DB.batch([sql(e,"UPDATE jobs SET state='done' WHERE id=?",id),sql(e,"INSERT INTO offers(lot,revision,digest,state) VALUES(?,?,?,'отправлено владельцу')",job.lot,job.revision,job.op.slice(4))]);return response({});
   }
+  if(path==='/agent/form'){
+    const id=req.headers.get('x-job'),lease=req.headers.get('x-lease');
+    const job=await sql(e,`SELECT j.*,o.id AS owner,v.payload FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision
+      JOIN versions v ON v.lot=l.id AND v.revision=l.revision CROSS JOIN owner o
+      WHERE j.id=? AND j.lease=? AND j.until_ts>=unixepoch() AND j.state='running' AND j.op LIKE 'form/%'
+      AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.lot=j.lot AND d.revision=j.revision)`,id,lease).first();
+    if(!job)return response({},409);
+    const input=JSON.parse(job.input);
+    const form=await req.formData().catch(()=>null);
+    const file=form?.get('file'),notes=form?.get('notes');
+    if(!await proven(e,job,lease,input.documentDigest))return response({proofRequired:true},409);
+    if(file===null&&typeof notes==='string'&&notes.length<=900){
+      await releaseFailure(e,job,lease!,notes,ctx);
+      return response({manual:true});
+    }
+    const suffix=input.form.name.match(/\.(docx|xlsx)$/i)?.[1].toLowerCase();
+    if(!suffix||!(file instanceof Blob)||file.size>8000000
+       ||String(new Uint8Array(await file.slice(0,4).arrayBuffer()))!=='80,75,3,4')return response({},400);
+    const answers=await sql(e,'SELECT field,value FROM answers WHERE owner=? AND lot=? AND revision=?',job.owner,job.lot,job.revision).all();
+    try{
+      const signed=offer(JSON.parse(job.payload),Object.fromEntries(answers.results.map(r=>[r.field,r.value])));
+      const signature=(await hash(JSON.stringify(signed.data))).slice(0,16);
+      const currentReview=await savedReview(e,job.lot,job.revision);
+      const currentForm=currentReview?.forms[input.index];
+      if(!currentForm||job.op!=='form/'+await formSignature(signature,input.documentDigest,input.index,currentForm))return response({},409);
+    }catch{return response({},409);}
+    const locked=await sql(e,`UPDATE jobs SET state='uncertain' WHERE id=? AND lease=? AND state='running' AND until_ts>=unixepoch()
+      AND EXISTS(SELECT 1 FROM lots l JOIN document_reviews d ON d.lot=l.id AND d.revision=l.revision
+        JOIN document_proofs p ON p.job=jobs.id AND p.lease=jobs.lease AND p.digest=d.digest
+        WHERE l.id=jobs.lot AND l.revision=jobs.revision AND d.digest=? AND p.checked>=unixepoch()-180)
+      AND NOT EXISTS(SELECT 1 FROM decisions WHERE lot=jobs.lot AND revision=jobs.revision) RETURNING id`,id,lease,input.documentDigest).first();
+    if(!locked)return response({},409);
+    const telegram=new FormData();
+    telegram.set('chat_id',job.owner);
+    telegram.set('document',file,'Черновик - '+input.form.name.replace(/[\\/\r\n"]/g,' ').slice(-150));
+    telegram.set('caption',typeof notes==='string'&&notes.length<=900?notes:
+      'Черновик для проверки. Проверьте обязательные поля, реквизиты, подпись и приложения перед подачей.');
+    const sent=await telegramSend(e,'sendDocument',telegram);
+    const delay=sent?await retryDelay(sent):null;
+    if(delay!==null){
+      await e.DB.batch([cooldown(e,delay),sql(e,"UPDATE jobs SET state='queued',until_ts=unixepoch()+?,lease=NULL,attempts=max(0,attempts-1) WHERE id=? AND lease=? AND state='uncertain'",delay,id,lease)]);
+      return response({deferred:true},202);
+    }
+    const result=await telegramResult(sent);
+    if(result.state==='sent'||result.state==='failed')await sql(e,
+      "UPDATE jobs SET state=? WHERE id=? AND lease=? AND state='uncertain'",result.state==='sent'?'done':'failed',id,lease).run();
+    return response({},result.state==='sent'?200:502);
+  }
   const body=await req.json() as any;
+  if(path==='/agent/document-claim'){
+    await sql(e,`DELETE FROM document_tasks WHERE key IN (
+      SELECT key FROM document_tasks WHERE watched=0 AND created<unixepoch()-172800 AND until_ts<unixepoch()
+      ORDER BY created LIMIT 32)`).run();
+    const task=await sql(e,`UPDATE document_tasks SET lease=?,until_ts=unixepoch()+240
+      WHERE key=(SELECT key FROM document_tasks WHERE due<=unixepoch() AND until_ts<unixepoch()
+        AND (watched=1 OR created>=unixepoch()-172800) AND (SELECT paused FROM agent_state WHERE id=1)=0
+        ORDER BY (watched=?) DESC,CASE WHEN watched=1 THEN due ELSE -created END LIMIT 1) RETURNING key,url,lease,watched`,
+      crypto.randomUUID(),body.discovery===true?0:1).first();
+    return response(task??null);
+  }
+  if(path==='/agent/document-result'){
+    const task=await sql(e,'SELECT * FROM document_tasks WHERE key=? AND lease=? AND until_ts>=unixepoch()',body.key,body.lease).first();
+    if(!task)return response({},409);
+    const review=validatedReview(body);
+    const card=originalFromReport(body,task.url);
+    if(!card||!review||!await sameReview(review)){
+      await sql(e,"UPDATE document_tasks SET lease=NULL,until_ts=0,due=unixepoch()+1800,error=? WHERE key=? AND lease=?", 'Оригинал или приложения недоступны',task.key,task.lease).run();
+      return response({retry:true});
+    }
+    const matched=acceptingCard(card)?documentMatch(card,review):null;
+    const previous=await sql(e,'SELECT id,revision FROM lots WHERE canonical=?',identity(card)).first();
+    if(previous){
+      const version=await sql(e,'SELECT seen FROM versions WHERE lot=? AND revision=?',previous.id,previous.revision).first();
+      if(version&&version.seen>task.until_ts-240){
+        await sql(e,'UPDATE document_tasks SET lease=NULL,until_ts=0,due=unixepoch() WHERE key=? AND lease=?',task.key,task.lease).run();
+        return response({retry:true});
+      }
+    }
+    const tracked=Boolean(task.watched||previous||matched);
+    if(tracked)await saveCard(e,card,previous?.revision,review,false);
+    const statements=[sql(e,`UPDATE document_tasks SET lease=NULL,until_ts=0,checked=unixepoch(),due=unixepoch()+?,
+      watched=max(watched,?),error=? WHERE key=? AND lease=?`,tracked?(review.complete?(acceptingCard(card)?3600:86400):1800):86400,Number(tracked),
+      review.complete?null:'Не все приложения получены',task.key,task.lease)];
+    if(matched&&card.source==='eis-order'){
+      const message='ЕИС · закупка найдена по приложению\n'+card.title.slice(0,420)+'\n'+matched.location+
+        (matched.service?'\n'+matched.service.file+', '+matched.service.location+': '+matched.service.quote:'')+'\n'+card.url;
+      const {statements:notice}=noticeStatements(e,'eis-orders',[{title:card.title,url:card.url}],false);
+      statements.push(...notice,queueEisNotice(e,card.url,JSON.stringify({text:message,location:matched.location})));
+    }
+    await e.DB.batch(statements);
+    await dispatchQueued(e,ctx);
+    return response({ok:true,matched:Boolean(matched)});
+  }
+  if(path==='/agent/document-proof'){
+    const job=await sql(e,`SELECT j.*,o.id AS owner,v.payload FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision
+      JOIN versions v ON v.lot=l.id AND v.revision=l.revision CROSS JOIN owner o
+      WHERE j.id=? AND j.lease=? AND j.until_ts>=unixepoch() AND j.state='running'
+      AND (j.op LIKE 'pdf/%' OR j.op LIKE 'form/%')`,body.id,body.lease).first();
+    if(!job)return response({},409);
+    const old=JSON.parse(job.payload),input=JSON.parse(job.input);
+    const card=originalFromReport(body,old.url);
+    const review=validatedReview(body);
+    if(!card||!review?.complete||!await sameReview(review)){
+      if(card&&identity(card)===identity(old)&&JSON.stringify(card)!==JSON.stringify(old)){
+        await saveCard(e,card,job.revision);
+      }
+      await releaseFailure(e,job,body.lease,'Документ не отправлен. Полную сверку оригинала и приложений пройти не удалось.',ctx);
+      return response({current:false});
+    }
+    if(JSON.stringify(card)!==JSON.stringify(old)||input.documentDigest!==review.digest||!acceptingCard(card)){
+      await saveCard(e,card,job.revision,review);
+      const queued=queueDocuments(e,card.url,true,true);
+      if(queued)await sql(e,'UPDATE document_tasks SET due=unixepoch() WHERE key=?',documentKey(card.url)).run();
+      await releaseFailure(e,job,body.lease,'Документ не отправлен. Оригинал, срок или приложения изменились. Откройте текущую версию и сверяйте условия заново.',ctx);
+      return response({current:false});
+    }
+    await sql(e,`INSERT INTO document_proofs(job,lease,digest) VALUES(?,?,?)
+      ON CONFLICT(job) DO UPDATE SET lease=excluded.lease,digest=excluded.digest,checked=unixepoch()`,job.id,body.lease,review.digest).run();
+    return response({current:true});
+  }
   if(path==='/agent/card-claim'){
     const task=await sql(e,"UPDATE pending_cards SET lease=?,available=unixepoch()+120 WHERE url=(SELECT url FROM pending_cards WHERE available<=unixepoch() AND (SELECT paused FROM agent_state WHERE id=1)=0 ORDER BY request_id LIMIT 1) RETURNING url,lease",crypto.randomUUID()).first();
     return response(task??null);
@@ -657,6 +908,8 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     }
     const location=matched?await confirmLocation({title,url}):'';
     const {statements,notifications}=noticeStatements(e,eis?(match[2]?'eis-price_requests':'eis-orders'):regional?'otc-khab':eat?'eat':rts?'rts-rzd-search':'comita-rzd',[{title,url,published,location}],!review);
+    const background=eis?queueDocuments(e,url):null;
+    if(background)statements.push(background);
     const results=await e.DB.batch(statements);
     if(notifications.some(i=>results[i].meta.changes>0))await dispatchQueued(e,ctx);
     return response({status:matched?'accepted':'filtered'});
@@ -692,7 +945,7 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     return response({...state,pendingCard:Boolean(pending),failedCatalogues:failed.results.map(r=>r.id),rosneftPage:Number(failed.results.find(r=>r.id==='rosneft')?.cursor)||1});
   }
   if(path==='/agent/claim'){
-    const job=await sql(e,"UPDATE jobs SET state='running',lease=?,until_ts=unixepoch()+300,attempts=attempts+1 WHERE id=(SELECT j.id FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE ((j.state='queued' AND j.until_ts<=unixepoch()) OR (j.state='running' AND j.until_ts<unixepoch())) AND (j.op NOT LIKE 'pdf/%' OR (NOT EXISTS(SELECT 1 FROM telegram_cooldown WHERE until_ts>unixepoch()) AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.lot=j.lot AND d.revision=j.revision))) AND j.attempts<4 AND (SELECT paused FROM agent_state WHERE id=1)=0 ORDER BY j.created LIMIT 1) RETURNING *",crypto.randomUUID()).first();
+    const job=await sql(e,"UPDATE jobs SET state='running',lease=?,until_ts=unixepoch()+300,attempts=attempts+1 WHERE id=(SELECT j.id FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE ((j.state='queued' AND j.until_ts<=unixepoch()) OR (j.state='running' AND j.until_ts<unixepoch())) AND ((j.op NOT LIKE 'pdf/%' AND j.op NOT LIKE 'form/%') OR (NOT EXISTS(SELECT 1 FROM telegram_cooldown WHERE until_ts>unixepoch()) AND NOT EXISTS(SELECT 1 FROM decisions d WHERE d.lot=j.lot AND d.revision=j.revision))) AND j.attempts<4 AND (SELECT paused FROM agent_state WHERE id=1)=0 ORDER BY j.created LIMIT 1) RETURNING *",crypto.randomUUID()).first();
     if(!job)return response(null);
     const version=await sql(e,'SELECT payload FROM versions WHERE lot=? AND revision=?',job.lot,job.revision).first();
     return response({...job,card:JSON.parse(version!.payload)});
@@ -700,6 +953,17 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
   if(path==='/agent/result'){
     if(typeof body.text!=='string'||body.text.length>3500)return response({},400);
     const args=[body.id,body.lease];
+    if(body.report){
+      const job=await sql(e,`SELECT j.lot,j.revision,v.payload FROM jobs j
+        JOIN lots l ON l.id=j.lot AND l.revision=j.revision JOIN versions v ON v.lot=l.id AND v.revision=l.revision
+        WHERE j.id=? AND j.lease=? AND j.op='analysis' AND j.state='running' AND j.until_ts>=unixepoch()`,...args).first();
+      if(job){
+        const prior=JSON.parse(job.payload);
+        const card=originalFromReport(body.report,prior.url);
+        const review=validatedReview(body.report);
+        if(card&&review&&await sameReview(review)&&identity(card)===identity(prior))await saveCard(e,card,job.revision,review);
+      }
+    }
     const [notification]=await e.DB.batch([
       sql(e,"INSERT OR IGNORE INTO outbox(dedupe,owner,payload) SELECT 'job/'||j.id,o.id,? FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision CROSS JOIN owner o WHERE j.id=? AND j.lease=? AND j.op='analysis' AND j.state='running' AND j.until_ts>=unixepoch()",JSON.stringify({text:body.text}),...args),
       sql(e,"UPDATE jobs SET state='done' WHERE id=? AND lease=? AND op='analysis' AND state='running' AND until_ts>=unixepoch() AND EXISTS(SELECT 1 FROM lots WHERE lots.id=jobs.lot AND lots.revision=jobs.revision)",...args)
