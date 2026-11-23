@@ -112,7 +112,9 @@ def replay_publications(conf):
             continue
         try:
             with closing(connection(path)) as db:
-                drain_candidates(db, lambda card: request(conf, endpoint, card), limit=1)
+                # Targeted searches can discover dozens of candidates together.
+                # Drain a bounded batch so the burst does not wait one tick per card.
+                drain_candidates(db, lambda card: request(conf, endpoint, card), limit=4)
         except Exception as error:
             print(time.strftime('%Y-%m-%d %H:%M:%S'), 'Передача ' + name + ':',
                   type(error).__name__, file=sys.stderr, flush=True)
