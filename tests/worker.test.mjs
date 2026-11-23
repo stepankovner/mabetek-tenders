@@ -22,6 +22,8 @@ test('Оригинал ЕИС связывает номер, заказчика,
   assert.equal(core.eisTime('07.12.2099 11:00').utc,null);
   assert.equal(core.eisTime('31.02.2099 11:00 (МСК+7)').utc,null);
   assert.ok(card.documentsPage.includes('/documents.html?'));
+  assert.equal(core.eisOrderCard(page+header('Заказчик','Другой заказчик'),url).customer,'');
+  assert.equal(core.eisOrderCard(page+header('Обновлено','23.11.2026'),url).updated,'23.11.2026');
   assert.throws(()=>core.eisOrderCard(page.replace('№ '+number,'№ 0322200001326000256'),url),/номер/i);
 });
 test('Зеркала и отдельные лоты',()=>{

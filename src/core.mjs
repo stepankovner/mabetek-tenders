@@ -106,13 +106,22 @@ export function eisOrderCard(html,url) {
     if(!next)continue;
     const key=clean(label[1]).toLowerCase();
     const value=span(html,label.index+label[0].length+next[0].length)?.value;
-    if(value&&!fields.has(key))fields.set(key,value);
+    if(value){
+      if(!fields.has(key))fields.set(key,new Set());
+      fields.get(key).add(value);
+    }
   }
-  const read=(...keys)=>keys.map(key=>fields.get(key)).find(Boolean)||'';
+  const read=(...keys)=>{
+    for(const key of keys){
+      const values=fields.get(key);
+      if(values)return values.size===1?[...values][0]:'';
+    }
+    return '';
+  };
   const title=read('объект закупки','наименование объекта закупки','наименование закупки');
   const customer=read('заказчик');
   const status=first('cardMainInfo__state')||read('этап закупки');
-  if(!title||!customer||!status)throw Error('Основные поля извещения ЕИС не распознаны');
+  if(!title||!status)throw Error('Основные поля извещения ЕИС не распознаны');
   const price=read('начальная цена').match(/^([\d ]+(?:,\d{1,2})?)\s*(?:₽|руб\.)$/i)?.[1]||'';
   const docsPath=new URL(url).pathname.replace(/common-info\.html$/,'documents.html');
   const docs=html.match(/<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>\s*Документы(?:\s+закупки)?\s*<\/a>/iu)?.[1];
@@ -122,6 +131,7 @@ export function eisOrderCard(html,url) {
     place:read('место поставки товара, выполнения работы или оказания услуги','место поставки товара или место выполнения работы или оказания услуги'),
     venue:read('наименование электронной площадки в информационно-телекоммуникационной сети «интернет»'),
     phone:read('номер контактного телефона'),
+    updated:read('обновлено'),
     deadline:read('дата и время окончания срока подачи заявок')};
 }
 
