@@ -618,6 +618,7 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
       eis_pagination_404:'ЕИС вернула HTTP 404 на продолжении',
       eis_pagination_unavailable:'ЕИС не отдала подтверждённую следующую страницу',
       eis_unrecognized_rows:'Часть строк ЕИС не распознана',
+      eis_search_incomplete:'ЕИС не подтвердила часть профильных запросов',
     };
     const partial=!body.ok && body.partial===true && typeof body.reason==='string';
     const partialReason=partial&&(

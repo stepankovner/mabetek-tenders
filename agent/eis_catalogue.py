@@ -6,9 +6,10 @@ import ssl
 import urllib.request
 import threading
 from contextlib import closing
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin
 
 from .eat_import import ingest, try_publish
 from .local import connection
@@ -19,6 +20,8 @@ REGISTRIES = {
     "orders": "/epz/order/extendedsearch/results.html",
     "price_requests": "/epz/pricereq/search/results.html",
 }
+SEARCH_TERMS = ("выгрузка вагонов", "железнодорожный тупик", "перевалка",
+                "ответственное хранение", "погрузочно-разгрузочные работы")
 NOTICE = re.compile(r"https://zakupki\.gov\.ru/(?:(?:epz/order/notice/[a-z0-9]+/(?:view/)?common-info\.html|223/purchase/public/purchase/info/common-info\.html)\?regNumber=(\d{11}|\d{19})|epz/pricereq/card/common-info\.html\?reestrNumber=(\d{19}))")
 ACTIVE = {"подача заявок", "подача предложений", "подача заявок на участие"}
 BLOCK = re.compile(r'<div\s+class="search-registry-entry-block\b[^"]*">')
@@ -40,6 +43,8 @@ def public_session():
 
 
 def text(fragment):
+    # EIS highlights word stems, so these inline tags may sit inside a word.
+    fragment = re.sub(r"<\s*/?\s*span\b[^>]*>", "", fragment, flags=re.I)
     return " ".join(html.unescape(re.sub("<[^>]+>", " ", fragment)).split())
 
 
@@ -73,6 +78,8 @@ def read_card(block, registry):
 def parse(page, registry, *, rejected=None):
     parts = BLOCK.split(page)[1:]
     if not parts:
+        if re.search(r'<p class="noRecords">\s*Поиск не дал результатов\s*</p>', page):
+            return []
         raise ValueError("ЕИС не вернула распознаваемые карточки")
     cards = []
     seen = set()
@@ -117,11 +124,33 @@ def read_html(url, procedure=None):
     return raw.decode("utf-8"), response.url
 
 
-def read_page(registry, number=1):
+def read_page(registry, number=1, *, term=None):
     url = HOST + REGISTRIES[registry]
-    if number > 1:
+    if term is not None:
+        params = dict(searchString=term, pageNumber=number, recordsPerPage="_50", morphology="on")
+        if registry == "orders":
+            params["af"] = "on"
+        url += "?" + urlencode(params)
+    elif number > 1:
         url += "?pageNumber=" + str(number)
-    return read_html(url)[0]
+    page = read_html(url)[0]
+    if term is not None:
+        class SearchForm(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.values = {}
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "input":
+                    fields = dict(attrs)
+                    if fields.get("id") in ("searchString", "pageNumber"):
+                        self.values[fields["id"]] = fields.get("value")
+
+        form = SearchForm()
+        form.feed(page)
+        if form.values != {"searchString": term, "pageNumber": str(number)}:
+            raise ValueError("ЕИС не подтвердила запрос или страницу")
+    return page
 
 
 def read_order(url):
@@ -134,7 +163,7 @@ def read_order(url):
     return page, target
 
 
-def collect(registry, path, publish=None):
+def collect(registry, path, publish=None, *, targeted=False):
     first = read_page(registry)
     rejected = []
     cards = parse(first, registry, rejected=rejected)
@@ -160,7 +189,7 @@ def collect(registry, path, publish=None):
                                     and error.code == 404 else "eis_pagination_unavailable")
                 if isinstance(error, HTTPError) and error.code == 429:
                     result["retry_after"] = retry_after(error.headers)
-                return result
+                return finish_collection(registry, path, publish, result, targeted)
             second = ingest(db, extra)
             if publish is not None:
                 try_publish(db, extra, publish, result, sample_nonmatches=True)
@@ -175,4 +204,68 @@ def collect(registry, path, publish=None):
             result["reason"] = "eis_unrecognized_rows"
         with db:
             db.execute("INSERT OR REPLACE INTO eis_cursor VALUES(?,?)", (registry, next_page))
+    return finish_collection(registry, path, publish, result, targeted)
+
+
+def finish_collection(registry, path, publish, result, targeted):
+    if targeted and "retry_after" not in result:
+        search = collect_search(registry, path, publish)
+        result["search_unique"] = search["unique"]
+        result["inserted"] += search["inserted"]
+        result["differences"].extend(search["differences"])
+        for key in ("reason", "retry_after", "publication_pending"):
+            if key in search and key not in result:
+                result[key] = search[key]
+    return result
+
+
+def collect_search(registry, path, publish=None, *, terms=None):
+    # Use a separate continuation for each query so a busy term cannot hide
+    # rarer procurements behind the first 50 results of another query.
+    if terms is None:
+        terms = SEARCH_TERMS + (("7708503727",) if registry == "orders" else ())
+    result = dict(unique=0, inserted=0, differences=[])
+    cards = {}
+    with closing(connection(path)) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS eis_search_cursor(
+            term TEXT PRIMARY KEY, next_page INTEGER NOT NULL)""")
+        for term in terms:
+            row = db.execute("SELECT next_page FROM eis_search_cursor WHERE term=?", (term,)).fetchone()
+            number = row[0] if row else 2
+            for page_number in (1, number):
+                try:
+                    page = read_page(registry, page_number, term=term)
+                    rejected = []
+                    batch = parse(page, registry, rejected=rejected)
+                except (OSError, ValueError) as error:
+                    result["reason"] = "eis_search_incomplete"
+                    if isinstance(error, HTTPError) and error.code == 429:
+                        result["retry_after"] = retry_after(error.headers)
+                    break
+                new_cards = [card for card in batch if card["procedure"] not in cards]
+                cards.update((card["procedure"], card) for card in new_cards)
+                observed = ingest(db, new_cards)
+                result["inserted"] += observed["inserted"]
+                result["differences"].extend(observed["differences"])
+                if rejected:
+                    result["reason"] = "eis_search_incomplete"
+                if page_number == 1 and number > 2 and f'data-pagenumber="{number}"' not in page:
+                    # The first page only exposes nearby pages and the last
+                    # page. Reset only if the total visibly shrank below us.
+                    advertised = [int(n) for n in re.findall(r'data-pagenumber="(\d+)"', page)]
+                    if max(advertised, default=1) < number:
+                        with db:
+                            db.execute("DELETE FROM eis_search_cursor WHERE term=?", (term,))
+                        break
+                if page_number == 1 and number == 2 and 'data-pagenumber="2"' not in page:
+                    break
+                if page_number == number and not rejected:
+                    following = number + 1 if f'data-pagenumber="{number+1}"' in page else 2
+                    with db:
+                        db.execute("INSERT OR REPLACE INTO eis_search_cursor VALUES(?,?)", (term, following))
+            if "retry_after" in result:
+                break
+        result["unique"] = len(cards)
+        if publish is not None:
+            try_publish(db, list(cards.values()), publish, result)
     return result

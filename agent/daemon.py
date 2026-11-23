@@ -189,6 +189,8 @@ def start_collector(conf, source, name, collect):
             partial = reason is not None
             ok = not partial
             detail = f"{result['unique']} карточек, добавлено {result['inserted']}"
+            if 'search_unique' in result:
+                detail += f" (по профильным запросам: {result['search_unique']})"
             if partial:
                 detail += ' (частичный обход: ' + reason + ')'
             if result.get('publication_pending'):
@@ -238,7 +240,7 @@ def schedule_catalogues(conf):
     for registry, label in (("orders", "ЕИС · закупки"), ("price_requests", "ЕИС · запросы цен")):
         start_collector(conf, "eis-" + registry, label, lambda registry=registry: eis_catalogue.collect(
             registry, CONFIG.parent / ("eis-" + registry + ".sqlite"),
-            lambda card: request(conf, "eis-candidate", card)))
+            lambda card: request(conf, "eis-candidate", card), targeted=True))
     if conf.get('eat_node'):
         start_collector(conf, 'eat', 'ЕАТ', lambda: eat_import.collect_local(
             conf['eat_node'], conf['eat_modules'], CONFIG.parent / 'eat-inbox.sqlite',

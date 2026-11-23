@@ -3,6 +3,37 @@ from agent.eis_catalogue import parse
 
 
 class EIS(unittest.TestCase):
+    def test_targeted_search_validates_query_and_accepts_eis_empty_page(self):
+        from unittest.mock import patch
+        from agent.eis_catalogue import read_page
+        response = """<input id="searchString" data-tooltip='<span>Поиск</span>' value="перевалка">
+        <input id="pageNumber" value="1"><p class="noRecords">Поиск не дал результатов</p>"""
+        with patch('agent.eis_catalogue.read_html', return_value=(response, None)) as read:
+            page = read_page('orders', term='перевалка')
+            self.assertEqual(parse(page, 'orders'), [])
+            self.assertIn('af=on', read.call_args.args[0])
+            for number, term in [(2, 'перевалка'), (1, 'другой запрос')]:
+                with self.assertRaises(ValueError):
+                    read_page('orders', number, term=term)
+
+    def test_targeted_query_error_keeps_other_queries_and_saved_continuation(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from agent.eis_catalogue import collect_search
+        empty = '<p class="noRecords">Поиск не дал результатов</p>'
+        first = empty + '<a data-pagenumber="2"></a><a data-pagenumber="3"></a>'
+        second = empty + '<a data-pagenumber="3"></a>'
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'inbox.sqlite'
+            with patch('agent.eis_catalogue.read_page', side_effect=[OSError(), first, second]):
+                result = collect_search('orders', path, terms=('ошибка', 'перевалка'))
+            self.assertEqual(result['reason'], 'eis_search_incomplete')
+            with patch('agent.eis_catalogue.read_page', side_effect=[first, empty]) as read:
+                result = collect_search('orders', path, terms=('перевалка',))
+            self.assertEqual(read.call_args.args, ('orders', 3))
+            self.assertNotIn('reason', result)
+
     def test_cloud_outage_does_not_stop_pagination_or_lose_candidates(self):
         import tempfile
         import sqlite3
@@ -32,7 +63,7 @@ class EIS(unittest.TestCase):
         page = """<div class="search-registry-entry-block box">
         <span class="registry-entry__header-mid__number"><a href="/epz/pricereq/card/common-info.html?reestrNumber=0332200065926000089">№ 0332200065926000089</a></span>
         <span class="registry-entry__header-mid__title">Подача предложений</span>
-        <div class="registry-entry__body-value">Погрузка &amp; хранение</div>"""
+        <div class="registry-entry__body-value">Погрузка &amp; <span class='highlightColor'>хранен</span>ие</div>"""
         self.assertEqual(parse(page, "price_requests")[0]["title"], "Погрузка & хранение")
         self.assertEqual(parse(page.replace("Подача предложений", "Работа комиссии"), "price_requests"), [])
         for invalid in (page.replace("№ 0332", "№ 1332"), page + page, "<html>Вход</html>"):
