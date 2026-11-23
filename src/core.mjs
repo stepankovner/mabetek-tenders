@@ -84,28 +84,36 @@ export function eisOrderCard(html,url) {
   const procedure=eisOrderNumber(url);
   if(!procedure)throw Error('Требуется ссылка на извещение ЕИС');
   const clean=value=>value.replace(/<[^>]*>/g,' ').replace(/&nbsp;|&#160;|&#xA0;/gi,' ')
-    .replace(/&quot;|&#34;/gi,'"').replace(/&amp;/gi,'&').replace(/\s+/g,' ').trim();
-  function span(source,index){
+    .replace(/&quot;|&#34;/gi,'"').replace(/&#8381;|&#x20bd;/gi,'₽')
+    .replace(/&amp;/gi,'&').replace(/\s+/g,' ').trim();
+  function element(source,index,tag){
     let depth=1;
-    for(const token of source.slice(index).matchAll(/<\/?span\b[^>]*>/gi)){
+    const pattern=tag==='div'?/<\/?div\b[^>]*>/gi:/<\/?span\b[^>]*>/gi;
+    for(const token of source.slice(index).matchAll(pattern)){
       depth+=token[0][1]==='/'?-1:1;
       if(depth===0)return {value:clean(source.slice(index,index+token.index)),end:index+token.index+token[0].length};
     }
     return null;
   }
-  function first(className) {
-    const tag=[...html.matchAll(/<span\b[^>]*class=["']([^"']*)["'][^>]*>/gi)]
-      .find(item=>item[1].split(/\s+/).includes(className));
-    return tag?span(html,tag.index+tag[0].length)?.value||'':'';
+  function first(className,tag='span') {
+    const pattern=tag==='div'?/<div\b[^>]*class=["']([^"']*)["'][^>]*>/gi:/<span\b[^>]*class=["']([^"']*)["'][^>]*>/gi;
+    const opening=[...html.matchAll(pattern)].find(item=>item[1].split(/\s+/).includes(className));
+    return opening?element(html,opening.index+opening[0].length,tag)?.value||'':'';
   }
-  const visible=first('cardMainInfo__purchaseLink').replace(/^№\s*/,'');
+  const modern=first('cardMainInfo__purchaseLink');
+  const legacy=!modern&&procedure.length===11;
+  const visible=(modern||(legacy?first('registry-entry__header-mid__number','div'):'')).replace(/^№\s*/,'');
   if(visible!==procedure)throw Error('ЕИС: номер в карточке отличается от номера ссылки');
   const fields=new Map();
-  for(const label of html.matchAll(/<span\b[^>]*class=["'](?:cardMainInfo__title|section__title)(?:\s[^"']*)?["'][^>]*>([^<]*)<\/span>/gi)){
-    const next=/^\s*<span\b[^>]*class=["'](?:cardMainInfo__content|section__info)(?:\s[^"']*)?["'][^>]*>/i.exec(html.slice(label.index+label[0].length));
+  const labels=legacy?/<div\b[^>]*class=["'](?:common-text__title|data-block__title)(?:\s[^"']*)?["'][^>]*>([^<]*)<\/div>/gi
+    :/<span\b[^>]*class=["'](?:cardMainInfo__title|section__title)(?:\s[^"']*)?["'][^>]*>([^<]*)<\/span>/gi;
+  const valuePattern=legacy?/^\s*<div\b[^>]*class=["'](?:common-text__value|data-block__value)(?:\s[^"']*)?["'][^>]*>/i
+    :/^\s*<span\b[^>]*class=["'](?:cardMainInfo__content|section__info)(?:\s[^"']*)?["'][^>]*>/i;
+  for(const label of html.matchAll(labels)){
+    const next=valuePattern.exec(html.slice(label.index+label[0].length));
     if(!next)continue;
     const key=clean(label[1]).toLowerCase();
-    const value=span(html,label.index+label[0].length+next[0].length)?.value;
+    const value=element(html,label.index+label[0].length+next[0].length,legacy?'div':'span')?.value;
     if(value){
       if(!fields.has(key))fields.set(key,new Set());
       fields.get(key).add(value);
@@ -119,20 +127,32 @@ export function eisOrderCard(html,url) {
     return '';
   };
   const title=read('объект закупки','наименование объекта закупки','наименование закупки');
-  const customer=read('заказчик');
-  const status=first('cardMainInfo__state')||read('этап закупки');
+  const customer=legacy?read('наименование организации'):read('заказчик');
+  const status=legacy?first('registry-entry__header-mid__title','div'):first('cardMainInfo__state')||read('этап закупки');
   if(!title||!status)throw Error('Основные поля извещения ЕИС не распознаны');
-  const price=read('начальная цена').match(/^([\d ]+(?:,\d{1,2})?)\s*(?:₽|руб\.)$/i)?.[1]||'';
+  const quotedPrice=legacy?first('price-block__value','div'):read('начальная цена');
+  const price=quotedPrice.match(/^([\d ]+(?:,\d{1,2})?)\s*(?:₽|руб\.)$/i)?.[1].trim()||'';
   const docsPath=new URL(url).pathname.replace(/common-info\.html$/,'documents.html');
   const docs=html.match(/<a\b[^>]*\bhref=["']([^"']+)["'][^>]*>\s*Документы(?:\s+закупки)?\s*<\/a>/iu)?.[1];
-  const documentsPage=docs&&[docsPath+'?regNumber='+procedure,'https://zakupki.gov.ru'+docsPath+'?regNumber='+procedure].includes(docs)
+  let documentsPage=docs&&[docsPath+'?regNumber='+procedure,'https://zakupki.gov.ru'+docsPath+'?regNumber='+procedure].includes(docs)
     ?new URL(docs,url).href:'';
+  if(legacy&&docs){
+    try{
+      const tab=new URL(docs.replace(/&amp;/g,'&'),url);
+      const keys=[...tab.searchParams.keys()].sort().join(',');
+      const guid=tab.searchParams.get('noticeGuid')||'';
+      if(tab.origin==='https://zakupki.gov.ru'&&!tab.username&&!tab.password&&!tab.hash
+        &&tab.pathname==='/epz/order/notice/notice223/documents.html'
+        &&keys==='noticeGuid,purchaseNoticeNumber'&&tab.searchParams.get('purchaseNoticeNumber')===procedure
+        &&/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(guid))documentsPage=tab.href;
+    }catch{}
+  }
   return {source:'eis-order',eis:procedure,procedure,lot:'процедура',title,customer,status,price,url,documentsPage,
     place:read('место поставки товара, выполнения работы или оказания услуги','место поставки товара или место выполнения работы или оказания услуги'),
     venue:read('наименование электронной площадки в информационно-телекоммуникационной сети «интернет»'),
-    phone:read('номер контактного телефона'),
+    phone:read('номер контактного телефона','контактный телефон'),
     updated:read('обновлено'),
-    deadline:read('дата и время окончания срока подачи заявок')};
+    deadline:read('дата и время окончания срока подачи заявок','дата и время окончания срока подачи заявок (по местному времени заказчика)','окончание подачи заявок')};
 }
 
 export function b2bIndex(html) {

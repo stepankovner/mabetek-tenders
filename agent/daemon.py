@@ -319,10 +319,11 @@ def tick(conf):
             with urllib.request.build_opener(NoRedirect()).open(req,timeout=50) as res:res.read()
         return
     evidence=""
-    if card.get("source")=="rzd-rts":
-        from .rzd_documents import review
+    if card.get("source") in ("rzd-rts", "eis-order"):
+        from . import eis_documents, rzd_documents
+        reviewer = eis_documents if card["source"] == "eis-order" else rzd_documents
         try:
-            evidence=review(card,CONFIG.parent/"documents")
+            evidence=reviewer.review(card,CONFIG.parent/"documents")
         except (OSError,ValueError):
             evidence="Оригинал с приложениями недоступен."
     result=analysis_message(card,evidence)

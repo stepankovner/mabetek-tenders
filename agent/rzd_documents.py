@@ -122,16 +122,24 @@ def review(card, cache):
     if url.netloc!='rzd.rts-tender.ru' or url.scheme!='https' or url.path!='/TenderInterests/LogViewAndRedirect' or not re.fullmatch(r'\d{1,16}',ident):
         return ''
     attachments = attachment_links(fetch(card['url'], 1024*1024).decode('utf-8','replace'))
-    cache = cache/ident
+    return review_attachments(attachments, cache/ident, fetch, use_cached=True, model_base=cache.parent)
+
+
+def review_attachments(attachments, cache, download, *, use_cached=False, model_base=None, limit=6):
+    if not attachments:
+        return 'На вкладке документов не найдены доступные для разбора приложения.'
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
     notes = []
     fragments = []
-    for name, link in attachments[:6]:
+    for name, link in attachments[:limit]:
+        if not EXT.search(name):
+            notes.append(f'{name}: формат приложения пока не поддерживается.')
+            continue
         try:
             try:
-                data = fetch(link, MAX_BYTES)
+                data = download(link, MAX_BYTES)
             except OSError:
-                data = cached_attachment(cache, name, link)
+                data = cached_attachment(cache, name, link) if use_cached else None
                 if data is None:
                     raise
                 notes.append(f'{name}: сервер приложения недоступен. Использована сохранённая копия с проверенной SHA-256. Актуальность содержимого не подтверждена.')
@@ -155,9 +163,10 @@ def review(card, cache):
                 notes.append(evidence)
         except (OSError,ValueError,RuntimeError,BadZipFile,ParseError,subprocess.SubprocessError) as exc:
             notes.append(f'{name}: не удалось проверить ({type(exc).__name__})')
-    if len(attachments)>6:
-        notes.append('Обработаны первые шесть приложений.')
+    if len(attachments)>limit:
+        notes.append(f'Разбор ограничен первыми {limit} приложениями из {len(attachments)}.')
     if not notes:
         notes.append('Конкретное место в обработанных приложениях установить не удалось.')
-    notes.append(analyze(select_fragments(fragments),cache.parent.parent))
+    if model_base is not None:
+        notes.append(analyze(select_fragments(fragments),model_base))
     return '\n'.join(notes)

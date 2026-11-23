@@ -26,6 +26,33 @@ test('Оригинал ЕИС связывает номер, заказчика,
   assert.equal(core.eisOrderCard(page+header('Обновлено','23.11.2026'),url).updated,'23.11.2026');
   assert.throws(()=>core.eisOrderCard(page.replace('№ '+number,'№ 0322200001326000256'),url),/номер/i);
 });
+test('ЕИС 223-ФЗ читает альтернативную разметку и привязывает документы к номеру',()=>{
+  const number='32616611130';
+  const base='https://zakupki.gov.ru/epz/order/notice/notice223/';
+  const url=base+'common-info.html?regNumber='+number;
+  const tab='documents.html?purchaseNoticeNumber='+number+'&noticeGuid=065fb6a1-f124-4aad-8251-e85321fad545';
+  const field=(name,value)=>'<div class="common-text__title">'+name+'</div><div class="common-text__value">'+value+'</div>';
+  const page='<div class="registry-entry__header-mid__number"><a>№ '+number+'</a></div>'+
+    '<div class="registry-entry__header-mid__title">Подача заявок</div>'+
+    field('Наименование закупки','Погрузка вагонов')+
+    field('Наименование организации','<div class="common-text__value"><a>Заказчик</a></div>')+
+    field('Место нахождения','Хабаровск, ул. Ленина')+
+    field('Контактный телефон','+7 000 000 00 00')+
+    field('Дата и время окончания срока подачи заявок (по местному времени заказчика)','30.11.2099 16:00 (МСК+7)')+
+    '<div class="price-block__value">3&nbsp;250&nbsp;243,00&nbsp;&#8381;</div>'+
+    '<a href="'+base+tab.replace('&','&amp;')+'">Документы</a>';
+  const card=core.eisOrderCard(page,url);
+  assert.equal(card.title,'Погрузка вагонов');
+  assert.equal(card.customer,'Заказчик');
+  assert.equal(card.place,'');
+  assert.equal(card.phone,'+7 000 000 00 00');
+  assert.equal(card.price,'3 250 243,00');
+  assert.equal(core.eisTime(card.deadline).utc,'2099-11-30T06:00:00.000Z');
+  assert.equal(card.documentsPage,base+tab);
+  assert.equal(core.eisOrderCard(page.replace('purchaseNoticeNumber='+number,'purchaseNoticeNumber=32616611131'),url).documentsPage,'');
+  assert.equal(core.eisOrderCard(page.replace('href="'+base,'href="https://example.org/'),url).documentsPage,'');
+  assert.throws(()=>core.eisOrderCard(page.replace('№ '+number,'№ 32616611131'),url),/номер/i);
+});
 test('Зеркала и отдельные лоты',()=>{
   assert.equal(typeof core.identity,'function');
   assert.equal(core.identity({...item,eis:'123'}),core.identity({...item,eis:'123',source:'rts'}));
