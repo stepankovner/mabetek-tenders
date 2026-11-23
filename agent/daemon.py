@@ -126,7 +126,7 @@ def verify_release(conf, job, data, *, form=False):
     from .customer_forms import approved_values
     from .procurement_documents import inspect
     try:
-        selected = data["form"]["url"] if form else None
+        selected = data["form"]["url"] if form and "form" in data else None
         report, output = inspect(job["card"]["url"], parse=False, selected=selected,
                                  values=approved_values(data["terms"]) if form else None)
     except (OSError, ValueError, LookupError):
@@ -141,14 +141,19 @@ def send_form(conf, job, data):
         return
     from .customer_forms import approved_values
     approved = approved_values(data["terms"])
-    fields = data["form"]["fields"]
+    fields = data.get("form", {}).get("fields", [])
     filled = [item["label"] for item in fields if item["fillable"] and approved.get(item["field"])]
     manual = [item["label"] for item in fields if not item["fillable"] or not approved.get(item["field"])]
-    if output:
+    if output and len(output[1]) > 8_000_000:
+        output = None
+        notes = "Черновик превышает лимит передачи. Перенесите значения из сводки и сверьте исходный бланк."
+    elif output:
         notes = "Черновик для проверки. Перенесены: " + ", ".join(dict.fromkeys(filled)) + "."
         if manual:
             notes += " Проверьте или заполните вручную: " + ", ".join(dict.fromkeys(manual)) + "."
         notes = notes[:790] + " Проверьте реквизиты, подпись и приложения."
+    elif data.get("legacy") == "rzd-word":
+        notes = "Бланк РЖД прошёл сверку."
     else:
         notes = "В исходном бланке не удалось однозначно заполнить поля. Используйте значения из сводки и сверьте форму вручную."
     boundary = uuid4().hex

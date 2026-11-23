@@ -1,7 +1,7 @@
 import {paragraphs} from './rzd-form-template';
 
 export const original='https://223.rts-tender.ru/files/FileDownloadHandler.ashx?FileGuid=364e6c01-2acd-4dd3-b3fa-18140140ffb7';
-const digest='4f254d2ed94e3e5ac4e7944a114fb532b987dd28534ea53b816d4523f34983ca';
+export const digest='4f254d2ed94e3e5ac4e7944a114fb532b987dd28534ea53b816d4523f34983ca';
 export function supportsForm(card:any){
   return card.source==='rzd-rts' && card.procedure==='24233643' && card.registration==='32616584495' && card.documents?.some((d:any)=>d.url.toLowerCase()===original.toLowerCase());
 }

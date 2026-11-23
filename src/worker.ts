@@ -1,4 +1,4 @@
-import {draftWord,supportsForm,verifyOriginal} from './rzd-form';
+import {digest as rzdTemplateDigest,draftWord,original as rzdTemplateUrl,supportsForm,verifyOriginal} from './rzd-form';
 import {rankNotices} from './semantic';
 import {b2b,publicPoll,macCatalogue,noticeStatements,queueEisNotice,confirmLocation} from './monitor';
 import {setup} from './setup';
@@ -229,6 +229,8 @@ function proven(e:Env,job:any,lease:any,digest:string){
   return sql(e,`SELECT 1 FROM document_proofs p JOIN document_reviews d ON d.lot=? AND d.revision=?
     WHERE p.job=? AND p.lease=? AND p.digest=? AND d.digest=p.digest AND p.checked>=unixepoch()-180`,job.lot,job.revision,job.id,lease,digest).first();
 }
+const currentRzdTemplate=(review:Review|null)=>Boolean(review?.digest&&review.files.some(
+  file=>file.url.toLowerCase()===rzdTemplateUrl.toLowerCase()&&file.sha256===rzdTemplateDigest));
 async function sameReview(report:Review|null){
   if(!report)return false;
   if(!report.complete)return true;
@@ -449,15 +451,19 @@ async function telegram(req:Request,e:Env){
         }
         if(text.startsWith('/word ')){
           if(text.split(' ')[3]!==signature || !supportsForm(card)){reply='Откройте актуальную сводку условий.';break;}
-          const current=await readCard(card.url);
-          const source=await verifyOriginal();
-          if(JSON.stringify(current)!==JSON.stringify(card)||source==='changed'){reply='Не удалось подтвердить исходную форму. Откройте оригинал и проверьте приложения.';break;}
-          const draft=draftWord(answers.verified,answers.vat);
-          const dedupe='word/'+user+'/'+lot+'/'+v+'/'+signature;
-          const previous=await sql(e,'SELECT state FROM outbox WHERE dedupe=?',dedupe).first();
-          if(previous){reply=previous.state==='sent'?'Эта версия формы уже отправлена в чат.':'Эта версия формы уже поставлена на отправку. Проверьте историю чата.';break;}
-          mutations.push(sql(e,'INSERT OR IGNORE INTO outbox(dedupe,owner,payload) VALUES(?,?,?)',dedupe,user,JSON.stringify({word:{lot:answers.verified,vat:answers.vat,cached:source==='unavailable'}})));
-          reply=draft.filled?'Подготовлен черновик Word со ставкой из ваших условий.':'Подготовлен черновик Word. Требуется ручное заполнение поля НДС.';
+          if(!review?.digest||!currentRzdTemplate(review)){
+            const queued=queueDocuments(e,card.url,true,true);
+            if(queued)mutations.push(queued);
+            reply='Автозаполнение бланка РЖД доступно после подтверждения исходной формы. Проверьте приложения и статус через «Разобрать».';
+            break;
+          }
+          const op='form/'+await formSignature(signature,review.digest,-1,'rzd-word');
+          const previous=await sql(e,'SELECT state FROM jobs WHERE lot=? AND revision=? AND op=?',lot,v,op).first();
+          if(previous?.state==='done'||previous?.state==='uncertain'){
+            reply=previous.state==='done'?'Эта версия формы уже отправлена в чат.':'Доставка черновика не подтверждена. Проверьте историю чата.';break;
+          }
+          mutations.push(enqueueRelease(e,lot,v,op,{terms:info.data,documentDigest:review.digest,index:-1,legacy:'rzd-word'}));
+          reply='Бланк РЖД поставлен в очередь. Перед выдачей агент заново сверит оригинал и приложения.';
           break;
         }
         const forms=[];
@@ -725,22 +731,35 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     if(!job)return response({},409);
     const input=JSON.parse(job.input);
     const form=await req.formData().catch(()=>null);
-    const file=form?.get('file'),notes=form?.get('notes');
+    let file=form?.get('file'),notes=form?.get('notes');
+    const legacy=input.legacy==='rzd-word';
     if(!await proven(e,job,lease,input.documentDigest))return response({proofRequired:true},409);
-    if(file===null&&typeof notes==='string'&&notes.length<=900){
+    if(!legacy&&file===null&&typeof notes==='string'&&notes.length<=900){
       await releaseFailure(e,job,lease!,notes,ctx);
       return response({manual:true});
     }
-    const suffix=input.form.name.match(/\.(docx|xlsx)$/i)?.[1].toLowerCase();
-    if(!suffix||!(file instanceof Blob)||file.size>8000000
-       ||String(new Uint8Array(await file.slice(0,4).arrayBuffer()))!=='80,75,3,4')return response({},400);
+    let filename:string;
     const answers=await sql(e,'SELECT field,value FROM answers WHERE owner=? AND lot=? AND revision=?',job.owner,job.lot,job.revision).all();
     try{
-      const signed=offer(JSON.parse(job.payload),Object.fromEntries(answers.results.map(r=>[r.field,r.value])));
+      const card=JSON.parse(job.payload);
+      const values=Object.fromEntries(answers.results.map(r=>[r.field,r.value]));
+      const signed=offer(card,values);
       const signature=(await hash(JSON.stringify(signed.data))).slice(0,16);
       const currentReview=await savedReview(e,job.lot,job.revision);
-      const currentForm=currentReview?.forms[input.index];
+      const currentForm=legacy?'rzd-word':currentReview?.forms[input.index];
       if(!currentForm||job.op!=='form/'+await formSignature(signature,input.documentDigest,input.index,currentForm))return response({},409);
+      if(legacy){
+        if(!supportsForm(card)||!currentRzdTemplate(currentReview))return response({},409);
+        const result=draftWord(values.verified,values.vat);
+        file=result.file;
+        filename='RZD-32616584495-lot-'+values.verified+'.docx';
+        notes='Черновик технического предложения РЖД. '+(result.filled?'Ставка НДС перенесена из ваших условий.':'Ставку НДС заполните вручную.')+
+          ' Проверьте соответствие ТЗ, место работ, сведения об участнике, персонале, согласия и подпись.';
+      }else{
+        if(!/\.(docx|xlsx)$/i.test(input.form.name)||!(file instanceof Blob)||file.size>8000000
+          ||String(new Uint8Array(await file.slice(0,4).arrayBuffer()))!=='80,75,3,4')return response({},400);
+        filename='Черновик - '+input.form.name.replace(/[\\/\r\n"]/g,' ').slice(-150);
+      }
     }catch{return response({},409);}
     const locked=await sql(e,`UPDATE jobs SET state='uncertain' WHERE id=? AND lease=? AND state='running' AND until_ts>=unixepoch()
       AND EXISTS(SELECT 1 FROM lots l JOIN document_reviews d ON d.lot=l.id AND d.revision=l.revision
@@ -750,7 +769,8 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     if(!locked)return response({},409);
     const telegram=new FormData();
     telegram.set('chat_id',job.owner);
-    telegram.set('document',file,'Черновик - '+input.form.name.replace(/[\\/\r\n"]/g,' ').slice(-150));
+    if(!(file instanceof Blob))return response({},400);
+    telegram.set('document',file,filename);
     telegram.set('caption',typeof notes==='string'&&notes.length<=900?notes:
       'Черновик для проверки. Проверьте обязательные поля, реквизиты, подпись и приложения перед подачей.');
     const sent=await telegramSend(e,'sendDocument',telegram);

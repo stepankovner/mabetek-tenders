@@ -29,6 +29,24 @@ def word(rows):
 
 
 class BuyerForms(unittest.TestCase):
+    def test_known_rzd_draft_checks_original_before_requesting_worker_render(self):
+        from agent.daemon import send_form
+        terms = {"items":[{"service":"Погрузка","qty":"1","unit":"вагон","rate":"10"}], "lot":"100/3",
+                 "terms":"По акту","dates":"5 декабря","validity":"4 декабря","vat":"НДС 20%"}
+        job = {"id":2,"lease":"fixture"}
+        conf = {"worker":"https://example.test","key":"fixture"}
+        with patch("agent.daemon.verify_release", return_value=(False, {}, None)), \
+                patch("agent.daemon.urllib.request.build_opener") as opener:
+            send_form(conf, job, {"legacy":"rzd-word","terms":terms})
+            opener.assert_not_called()
+        with patch("agent.daemon.verify_release", return_value=(True, {}, None)), \
+                patch("agent.daemon.urllib.request.build_opener") as opener:
+            send_form(conf, job, {"legacy":"rzd-word","terms":terms})
+            upload = opener.return_value.open.call_args.args[0]
+            self.assertEqual(upload.full_url, "https://example.test/agent/form")
+            self.assertNotIn(b'filename=', upload.data)
+            self.assertIn(b'name="notes"', upload.data)
+
     def test_word_preserves_package_and_never_changes_existing_or_ambiguous_values(self):
         name = "word/document.xml"
         original = package({name: word([("Номер лота", "___"), ("Количество", ""), ("Количество", ""),

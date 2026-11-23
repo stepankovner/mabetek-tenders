@@ -47,7 +47,7 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    throw Error('unexpected provider');
  };
  let seq=0;
- const call=(path,body,headers)=>worker.fetch(new Request('https://test.invalid'+path,{method:'POST',headers,body:typeof body==='string'||body instanceof Buffer?body:JSON.stringify(body)}),env);
+ const call=(path,body,headers)=>worker.fetch(new Request('https://test.invalid'+path,{method:'POST',headers,body:typeof body==='string'||body instanceof Buffer||body instanceof FormData?body:JSON.stringify(body)}),env);
  const talk=async(text,user=1,update=++seq)=>call('/telegram',{update_id:update,message:{chat:{type:'private',id:user},from:{id:user},text}},{'X-Telegram-Bot-Api-Secret-Token':env.WEBHOOK_SECRET});
  const agent=async(path,body)=> (await call('/agent/'+path,body,{Authorization:'Bearer '+env.AGENT_KEY})).json();
  try{
@@ -87,22 +87,33 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    assert.match(sent.at(-1).text,/20%/);
    const word = sent.at(-1).reply_markup.inline_keyboard[0][0].callback_data;
    await talk(word);
-   assert.equal(docs[0].get('document').name,'RZD-32616584495-lot-1.docx');
-   assert.match(docs[0].get('caption'),/НДС перенесена/);
-   await talk(word);
-   assert.equal(docs.length,1);
+   assert.match(sent.at(-1).text,/после подтверждения исходной формы/);
+   assert.equal(docs.length,0);
    const approvalButton=approval.reply_markup.inline_keyboard[0][0].callback_data;
    await talk(approvalButton);
    assert.match(sent.at(-1).text,/полная сверка приложений/);
    const reviewTask=await agent('document-claim',{});
    const report=documentReport(card,await (await global.fetch(card)).text(),[
-     {url:'https://223.rts-tender.ru/files/FileDownloadHandler.ashx?FileGuid=364e6c01-2acd-4dd3-b3fa-18140140ffb7',name:'Извещение.doc',sha256:'a'.repeat(64)}]);
+     {url:'https://223.rts-tender.ru/files/FileDownloadHandler.ashx?FileGuid=364e6c01-2acd-4dd3-b3fa-18140140ffb7',name:'Извещение.doc',sha256:'4f254d2ed94e3e5ac4e7944a114fb532b987dd28534ea53b816d4523f34983ca'}]);
    await agent('document-result',{...reviewTask,...report});
+   const prove=async job=>assert.deepEqual(await agent('document-proof',{...report,id:job.id,lease:job.lease}),{current:true});
+   await talk(word);
+   const formJob=await agent('claim',{});
+   assert.match(formJob.op,/^form\//);
+   const draftHeaders={Authorization:'Bearer '+env.AGENT_KEY,'x-job':String(formJob.id),'x-lease':formJob.lease};
+   const placeholder=new FormData();
+   placeholder.set('notes','Заполненный бланк РЖД');
+   assert.equal((await call('/agent/form',placeholder,draftHeaders)).status,409);
+   await prove(formJob);
+   assert.equal((await call('/agent/form',placeholder,draftHeaders)).status,200);
+   assert.equal(docs[0].get('document').name,'RZD-32616584495-lot-1.docx');
+   assert.match(docs[0].get('caption'),/НДС перенесена/);
+   await talk(word);
+   assert.equal(docs.length,1);
    await talk(approvalButton);
    const pdfJob=await agent('claim',{});assert.match(pdfJob.op,/^pdf\//);
    const pdf=Buffer.from('%PDF-1.7\nfixture');
    const headers={Authorization:'Bearer '+env.AGENT_KEY,'x-job':String(pdfJob.id),'x-lease':pdfJob.lease};
-   const prove=async job=>assert.deepEqual(await agent('document-proof',{...report,id:job.id,lease:job.lease}),{current:true});
    assert.equal((await call('/agent/pdf',pdf,headers)).status,409);
    await prove(pdfJob);
    const transport=global.fetch;
