@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {catalogPage} from '../tools/otc_market.mjs';
 import {activeCount} from '../tools/otc_region.mjs';
 import {readRzdPage,scan} from '../tools/rts_catalogue.mjs';
 import {runInNewContext} from 'node:vm';
@@ -79,4 +80,17 @@ test('Сверка НМЦ учитывает валюту, номер лота �
   assert.equal(visits,2);
   assert.ok(result.every(x=>x.match===null));
   assert.match(result[2].reason,/проверку доступа/);
+});
+
+
+test('ОТС различает пустую выдачу, неполную страницу и подтверждённый хвост',()=>{
+  const view={heading:'Тендеры коммерческие',summary:'По запросу найдено 0 тендеров коммерческих',activePage:'',rows:0};
+  assert.deepEqual(catalogPage('commercial',1,view,''),{pages:1,cards:[]});
+  const partial={...view,summary:'По запросу найден 21 тендер',activePage:'2',rows:0};
+  assert.throws(()=>catalogPage('commercial',2,partial,''));
+  assert.throws(()=>catalogPage('small',1,view,''));
+  const html='<div class="TenderItem-module_paper_x"><div class="TenderItem-module_salesCountdown_x"><span>5 ч осталось для подачи заявки</span></div>'+
+    '<a href="https://etp.otc.ru/tender/1234" class="TenderItem-module_title_x"><span class="index_lotNameTitle_x">Выгрузка вагонов</span></a>';
+  assert.deepEqual(catalogPage('commercial',2,{...partial,rows:1},html),
+    {pages:2,cards:[{url:'https://etp.otc.ru/tender/1234',title:'Выгрузка вагонов'}]});
 });

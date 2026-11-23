@@ -177,6 +177,8 @@ PUBLICATIONS = {
     'comita-inbox.sqlite': 'comita-candidate',
     'rts-inbox.sqlite': 'rts-candidate',
     'otc-khab-inbox.sqlite': 'otc-region-candidate',
+    'otc-small-live.sqlite': 'otc-region-candidate',
+    'otc-commercial-live.sqlite': 'otc-region-candidate',
     'eis-orders.sqlite': 'eis-candidate',
     'eis-price_requests.sqlite': 'eis-candidate',
 }
@@ -335,6 +337,12 @@ def schedule_catalogues(conf):
         start_collector(conf, 'otc-khab', 'OTC Хабаровский край', lambda: eat_import.collect_browser(
             conf['eat_node'], conf['eat_modules'], CONFIG.parent / 'otc-khab-inbox.sqlite',
             'otc_region.mjs', list, lambda card: request(conf, 'otc-region-candidate', card)))
+        for section, label in (('small', 'Малые закупки'), ('commercial', 'Коммерческие закупки')):
+            source = f'otc-{section}-live'
+            start_collector(conf, source, 'ОТС · ' + label, lambda section=section, source=source:
+                eat_import.collect_otc_market(conf['eat_node'], conf['eat_modules'],
+                    CONFIG.parent / (source + '.sqlite'), section,
+                    lambda card: request(conf, 'otc-region-candidate', card)))
     start_collector(conf, 'comita-rzd', 'КОМИТА РЖД', lambda: comita.collect(
         CONFIG.parent / 'comita-inbox.sqlite', lambda card: request(conf, 'comita-candidate', card)))
 

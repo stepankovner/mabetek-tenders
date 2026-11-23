@@ -583,6 +583,7 @@ async function telegram(req:Request,e:Env){
         [{text:'ЕИС · закупки',url:'https://zakupki.gov.ru/epz/order/extendedsearch/results.html'},{text:'ЕИС · запросы цен',url:'https://zakupki.gov.ru/epz/pricereq/search/results.html'}],
         [{text:'РТС · поиск',url:'https://www.rts-tender.ru/poisk/'},{text:'РЖД · секция РТС',url:'https://rzd.rts-tender.ru/'}],
         [{text:'ЕАТ Берёзка',url:'https://agregatoreat.ru/purchases/all'},{text:'OTC · Хабаровский край',url:'https://market.otc.ru/khabkray'}],
+        [{text:'OTC · малые',url:'https://etp.otc.ru/tenders-search/small/'},{text:'OTC · коммерческие',url:'https://etp.otc.ru/tenders-search/commercial/'}],
         [{text:'Росэлторг',url:publicCatalogues.roseltorg.url},{text:'Сбербанк-АСТ',url:'https://www.sberbank-ast.ru/'}],
         [{text:'ТЭК-Торг',url:publicCatalogues.tektorg.url},{text:'Роснефть',url:publicCatalogues.rosneft.url}],
         [{text:'Фабрикант',url:publicCatalogues.fabrikant.url},{text:'ЗаказРФ',url:publicCatalogues.zakazrf.url}],
@@ -593,7 +594,7 @@ async function telegram(req:Request,e:Env){
     }
     case '/status':{
       const sources=(await sql(e,'SELECT * FROM sources ORDER BY id').all()).results;
-      const labels:Record<string,string>={'eis-orders':'ЕИС · закупки','eis-price_requests':'ЕИС · запросы цен','watch/rzd':'РЖД · отслеживаемые оригиналы',eat:'ЕАТ Берёзка','otc-khab':'OTC · Хабаровский край','comita-rzd':'КОМИТА РЖД','rts-rzd-search':'РТС · РЖД',eis:'ЕИС',b2b:'B2B-Center',...Object.fromEntries(Object.entries(publicCatalogues).map(([id,c])=>[id,c.name]))};
+      const labels:Record<string,string>={'eis-orders':'ЕИС · закупки','eis-price_requests':'ЕИС · запросы цен','watch/rzd':'РЖД · отслеживаемые оригиналы',eat:'ЕАТ Берёзка','otc-khab':'OTC · Хабаровский край','otc-small-live':'OTC · малые закупки','otc-commercial-live':'OTC · коммерческие закупки','comita-rzd':'КОМИТА РЖД','rts-rzd-search':'РТС · РЖД',eis:'ЕИС',b2b:'B2B-Center',...Object.fromEntries(Object.entries(publicCatalogues).map(([id,c])=>[id,c.name]))};
       const sourceStatus=sources.map(s=>(s.id.startsWith('mac/')?'Mac · '+(labels[s.id.slice(4)]||s.id.slice(4)):(labels[s.id]||s.id))+': '+(s.last_error||(s.last_ok?'проверено '+new Date(s.last_ok*1000).toISOString():'проверки ещё не было'))).join('\n');
       const a=await sql(e,'SELECT * FROM agent_state WHERE id=1').first();
       const count=await sql(e,"SELECT count(*) AS n,min(j.created) AS oldest FROM jobs j JOIN lots l ON l.id=j.lot AND l.revision=j.revision WHERE j.state IN ('queued','running') AND (j.state='queued' OR j.until_ts>=unixepoch() OR j.attempts<4)").first();
@@ -907,6 +908,8 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     'eis-orders': {name:'ЕИС · закупки', page:'https://zakupki.gov.ru/epz/order/extendedsearch/results.html'},
     'eis-price_requests': {name:'ЕИС · запросы цен', page:'https://zakupki.gov.ru/epz/pricereq/search/results.html'},
     'otc-khab': {name:'OTC · Хабаровский край', page:'https://market.otc.ru/khabkray'},
+    'otc-small-live': {name:'OTC · малые закупки', page:'https://etp.otc.ru/tenders-search/small/'},
+    'otc-commercial-live': {name:'OTC · коммерческие закупки', page:'https://etp.otc.ru/tenders-search/commercial/'},
     'eat': {name:'ЕАТ Берёзка', page:'https://agregatoreat.ru/purchases/all'},
     'comita-rzd': {name:'КОМИТА РЖД', page:'https://market.comita.ru/purchases223'},
     'rts-rzd-search': {name:'РТС · РЖД', page:'https://www.rts-tender.ru/poisk/'}
@@ -925,6 +928,7 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const partial=!body.ok && body.partial===true && typeof body.reason==='string';
     const partialReason=partial&&(
       id.startsWith('eis-') && Object.hasOwn(eisReasons,body.reason)?eisReasons[body.reason]:
+      (id==='otc-small-live'||id==='otc-commercial-live') && body.reason==='otc_pagination_incomplete'?'ОТС: продолжение выдачи ожидает повторной проверки':
       id==='rts-rzd-search' && body.reason==='rts_pagination_incomplete'?'РТС не отдала продолжение выдачи':null
     );
     const error=partialReason?'Частичный обход. '+partialReason:
@@ -956,6 +960,8 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
     const {url,title,procedure}=body||{};
     const uid='[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}';
     const eis=path==='/agent/eis-candidate';
+    if(regional&&body?.section!=null&&body.section!=='small'&&body.section!=='commercial')return response({},400);
+    const otc=regional?(body?.section==='small'?'otc':body?.section==='commercial'?'otc-commercial':'otc-khab'):null;
     const eisUrl=/^https:\/\/zakupki\.gov\.ru\/(?:(?:epz\/order\/notice\/[a-z0-9]+\/(?:view\/)?common-info\.html|223\/purchase\/public\/purchase\/info\/common-info\.html)\?regNumber=(\d{11}|\d{19})|epz\/pricereq\/card\/common-info\.html\?reestrNumber=(\d{19}))$/;
     const original=eis?eisUrl:regional?/^https:\/\/etp\.otc\.ru\/tender\/(\d{1,16})$/:rts?/^https:\/\/223\.rts-tender\.ru\/supplier\/auction\/Trade\/View\.aspx\?Id=(\d{1,16})#\d{1,8}$/i:
       new RegExp(eat?'^https://agregatoreat\\.ru/purchases/announcement/'+uid+'/$':'^https://eshoprzd\\.ru/purchases/'+uid+'$');
@@ -975,7 +981,7 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
       published=value;
     }
     const location=matched?await confirmLocation({title,url}):'';
-    const {statements,notifications}=noticeStatements(e,eis?(match[2]?'eis-price_requests':'eis-orders'):regional?'otc-khab':eat?'eat':rts?'rts-rzd-search':'comita-rzd',[{title,url,published,location}],!review);
+    const {statements,notifications}=noticeStatements(e,eis?(match[2]?'eis-price_requests':'eis-orders'):(otc??(eat?'eat':rts?'rts-rzd-search':'comita-rzd')),[{title,url,published,location}],!review);
     const background=eis?queueDocuments(e,url):null;
     if(background)statements.push(background);
     const results=await e.DB.batch(statements);

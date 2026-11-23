@@ -72,7 +72,7 @@ def register_agent(domain, plist, data):
 
 def stage_release(root, releases):
     files = sorted((root / "agent").glob("*.py")) + sorted((root / "migrations").glob("*.sql"))
-    files.extend(root / "tools" / name for name in ("eat_catalogue.mjs", "rts_catalogue.mjs", "otc_region.mjs"))
+    files.extend(root / "tools" / name for name in ("eat_catalogue.mjs", "rts_catalogue.mjs", "otc_region.mjs", "otc_market.mjs"))
     files.extend((root / "src/core.mjs", root / "agent/eis-root.pem"))
     payload = [(f, f.relative_to(root)) for f in files]
     dependency = root / "node_modules/playwright-core"

@@ -66,7 +66,7 @@ CATALOGUES = {
     'tektorgRzd': 'https://www.tektorg.ru/org/rzd/procedures',
     'gpb': 'https://etpgpb.ru/procedures/',
     'zakazrf': 'https://zakazrf.ru/NotificationEx',
-    'otc': 'https://etp.otc.ru/tenders/small/',
+    'otc': 'https://etp.otc.ru/tenders-search/small/',
     'fabrikant': 'https://44.fabrikant.ru/44/catalog/procedure',
 }
 

@@ -198,7 +198,7 @@ export function b2bTitle(html,id) {
 export const publicCatalogues={
   rosneft:{name:'Роснефть · ТЭК-Торг',url:'https://www.tektorg.ru/rosneft/procedures'},
   fabrikant:{name:'Фабрикант · 44-ФЗ',url:'https://44.fabrikant.ru/44/catalog/procedure'},
-  otc:{name:'OTC · малые закупки',url:'https://etp.otc.ru/tenders/small/'},
+  otc:{name:'OTC · малые закупки',url:'https://etp.otc.ru/tenders-search/small/'},
   zakazrf:{name:'ЗаказРФ',url:'https://zakazrf.ru/NotificationEx'},
   rad:{name:'РАД',url:'https://gz.lot-online.ru/etp_back/procedure/list'},
   sberWorld:{name:'Сбербанк-АСТ · международная секция',url:'https://world.sberbank-ast.ru/tableForm.aspx?formCode=PurchaseList'},

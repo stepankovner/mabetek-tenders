@@ -76,6 +76,8 @@ def enqueue_candidates(db, cards, *, sample_nonmatches=False, commit=True):
                           (card['url'], title)).fetchone():
                 continue
             payload = dict(procedure=card['procedure'], url=card['url'], title=title)
+            if card.get('source') in ('otc-small-live', 'otc-commercial-live'):
+                payload['section'] = card['source'].split('-')[1]
             if card.get('source') == 'comita-rzd' and card.get('published'):
                 payload['published'] = card['published']
             if review:
@@ -167,6 +169,56 @@ def collect_rts(node, modules, path, publish=None):
     if reason:
         result['reason'] = reason
     return result
+
+
+def collect_otc_market(node, modules, path, section, publish=None):
+    if section not in ('small', 'commercial'):
+        raise ValueError('Неизвестная секция ОТС')
+    with closing(connection(path)) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS otc_market_cursor(
+            section TEXT PRIMARY KEY, page INTEGER NOT NULL, gaps TEXT NOT NULL)""")
+        state = db.execute("SELECT page,gaps FROM otc_market_cursor WHERE section=?", (section,)).fetchone()
+        cursor, gaps = state if state else (2, '[]')
+        script = Path(__file__).resolve().parents[1] / 'tools/otc_market.mjs'
+        run = subprocess.run([node, str(script), section, str(cursor), gaps], cwd=modules,
+                             capture_output=True, text=True, timeout=150, check=True)
+        snapshot = json.loads(run.stdout)
+        if snapshot.get('section') != section:
+            raise ValueError('ОТС вернула другую секцию')
+        delay = snapshot.get('retryAfter', 0)
+        if type(delay) is not int or delay < 0:
+            raise ValueError('Некорректный интервал ОТС')
+        if snapshot.get('blocked') is True and delay:
+            return dict(unique=0, inserted=0, reason='otc_pagination_incomplete', retry_after=delay)
+        cards = []
+        pages = snapshot.get('totalPages')
+        next_page = snapshot.get('next')
+        gaps = snapshot.get('gaps')
+        complete = snapshot.get('complete')
+        rows = snapshot.get('cards')
+        if (type(pages) is not int or not 1 <= pages <= 2000 or type(next_page) is not int
+                or not 2 <= next_page <= max(2, pages) or not isinstance(gaps, list)
+                or any(type(n) is not int or n < 2 or n > pages for n in gaps)
+                or type(complete) is not bool or (complete and (gaps or next_page != 2))
+                or not isinstance(rows, list) or len(rows) > 20 * pages):
+            raise ValueError('ОТС не подтвердила объём обхода')
+        for row in rows:
+            url, title = row['url'], row['title']
+            link = re.fullmatch(r'https://etp\.otc\.ru/tender/(\d{1,16})', url)
+            if not link or not isinstance(title, str) or not title.strip():
+                raise ValueError('Некорректная карточка ОТС')
+            cards.append(dict(source=f'otc-{section}-live', procedure=link[1], lot='1', url=url, title=title))
+        result = ingest(db, cards)
+        with db:
+            db.execute("INSERT OR REPLACE INTO otc_market_cursor VALUES(?,?,?)",
+                       (section, next_page, json.dumps(gaps)))
+        if not complete:
+            result['reason'] = 'otc_pagination_incomplete'
+        if delay:
+            result['retry_after'] = delay
+        if publish is not None:
+            try_publish(db, cards, publish, result)
+        return result
 
 
 def collect_local(node, modules, path, publish=None):

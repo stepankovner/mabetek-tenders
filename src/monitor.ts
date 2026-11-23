@@ -134,8 +134,8 @@ export function queueEisNotice(e:any,url:string,payload:string){
   return e.DB.prepare(query+" WHERE NOT EXISTS(SELECT 1 FROM outbox WHERE dedupe IN (?,?,?) AND state!='suppressed')"+upsert).bind(...args,...aliases);
 }
 
-export function noticeStatements(e:any,source:keyof typeof publicCatalogues | "eat" | "comita-rzd" | "rts-rzd-search" | "otc-khab" | "eis-orders" | "eis-price_requests",rows:{title:string,url:string,published?:string|null,location?:string}[],notify=true){
-  const catalogue=source==='eis-orders'?{name:'ЕИС · закупки'}:source==='eis-price_requests'?{name:'ЕИС · запросы цен'}:source==='otc-khab'?{name:'OTC · Хабаровский край'}:source==='eat'?{name:'ЕАТ Берёзка'}:source==='rts-rzd-search'?{name:'РТС · РЖД'}:source==='comita-rzd'?{name:'КОМИТА РЖД · Хабаровский край'}:publicCatalogues[source];
+export function noticeStatements(e:any,source:keyof typeof publicCatalogues | "eat" | "comita-rzd" | "rts-rzd-search" | "otc-khab" | "otc-commercial" | "eis-orders" | "eis-price_requests",rows:{title:string,url:string,published?:string|null,location?:string}[],notify=true){
+  const catalogue=source==='eis-orders'?{name:'ЕИС · закупки'}:source==='eis-price_requests'?{name:'ЕИС · запросы цен'}:source==='otc-khab'?{name:'OTC · Хабаровский край'}:source==='otc-commercial'?{name:'OTC · коммерческие закупки'}:source==='eat'?{name:'ЕАТ Берёзка'}:source==='rts-rzd-search'?{name:'РТС · РЖД'}:source==='comita-rzd'?{name:'КОМИТА РЖД · Хабаровский край'}:publicCatalogues[source];
   const q=(s:string,...params:unknown[])=>e.DB.prepare(s).bind(...params);
     const statements=[];
     const notifications:number[]=[];

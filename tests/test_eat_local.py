@@ -128,3 +128,31 @@ class ScheduledImport(unittest.TestCase):
                 self.assertEqual(sent,[dict(title='Выгрузка вагонов', procedure='123', url=cards[1]['url'])])
             finally:
                 db.close()
+
+
+class OtcMarket(unittest.TestCase):
+    def test_remembers_catalogue_cursor_and_enqueues_confirmed_section(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from agent.eat_import import collect_otc_market
+        partial = dict(section='commercial', next=3, gaps=[2], totalPages=5, complete=False,
+                       cards=[dict(url='https://etp.otc.ru/tender/123', title='Выгрузка вагонов в Хабаровске')])
+        complete = dict(partial, next=2, gaps=[], cards=[], complete=True)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'otc.sqlite'
+            with patch('agent.eat_import.subprocess.run', side_effect=[
+                SimpleNamespace(stdout=json.dumps(partial)), SimpleNamespace(stdout=json.dumps(complete)),
+            ]) as run:
+                received = []
+                def publish(item):
+                    received.append(item)
+                    return {'status':'accepted'}
+                first = collect_otc_market('node',folder,path,'commercial',publish)
+                second = collect_otc_market('node',folder,path,'commercial',publish)
+                self.assertEqual(first['reason'],'otc_pagination_incomplete')
+                self.assertNotIn('reason',second)
+                self.assertEqual(run.call_args.args[0][-3:],['commercial','3','[2]'])
+                self.assertEqual([item['section'] for item in received],['commercial'])

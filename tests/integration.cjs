@@ -64,7 +64,9 @@ test('Telegram, D1, очередь Mac и возврат PDF; повтор, из
    assert.match(sources.text,/Хабаровский край/);
    assert.match(sources.text,/\/watch/);
    const sourceLinks=sources.reply_markup.inline_keyboard.flat();
-   assert.equal(sourceLinks.length,16);
+   assert.equal(sourceLinks.length,18);
+   assert.ok(sourceLinks.some(({url})=>url==='https://etp.otc.ru/tenders-search/small/'));
+   assert.ok(sourceLinks.some(({url})=>url==='https://etp.otc.ru/tenders-search/commercial/'));
    assert.ok(sourceLinks.every(({url})=>new URL(url).protocol==='https:'));
    assert.ok(sourceLinks.some(({url})=>url==='https://www.rts-tender.ru/poisk/'));
    await talk('/watch '+card);const n=sent.length;await talk('/watch '+card,1,seq);assert.equal(sent.length,n);
