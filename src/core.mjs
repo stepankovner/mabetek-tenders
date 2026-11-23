@@ -420,3 +420,18 @@ export function catalogueMatch(title){
   if(foodProvision.test(subject))return false;
   return serviceMatch(subject);
 }
+
+export function khabarovskLocation(title,place=''){
+  const city='хабаровск(?:е|-[12])?(?![а-яё0-9-])';
+  const explicit=new RegExp('(?:^|[^а-яё])(?:в\\s+(?:г(?:ороде)?\\.?\\s*)?|г(?:ород)?\\.?\\s+|(?:ст\\.|станци[ия])\\s+)'+city,'iu');
+  if(place){
+    const inPlace=new RegExp('(?:^|[^а-яё])'+city,'iu');
+    // A named delivery location takes precedence over a catalogue title.
+    return inPlace.test(place) && !/маршрут|по всей россии|\b(?:https?|www)\b/iu.test(place)
+      ? 'Место исполнения в оригинале: '+place.trim().slice(0,280) : '';
+  }
+  // An organisation's name, registered address or point of departure is not a work site.
+  const subject=title.split(/(?:для нужд|заказчик\s*[:—]|адрес заказчика|место нахождения)/iu)[0];
+  if(!explicit.test(subject)||/(?:из\s+хабаровска|хабаровск[а-яё-]*\s*(?:[—–→]|\s-\s)|маршрут|перевозк|транспортировк)/iu.test(subject))return '';
+  return 'В названии указано место работ: Хабаровск';
+}

@@ -1,11 +1,11 @@
 import {draftWord,supportsForm,verifyOriginal} from './rzd-form';
 import {rankNotices} from './semantic';
-import {b2b,publicPoll,macCatalogue,noticeStatements,queueEisNotice} from './monitor';
+import {b2b,publicPoll,macCatalogue,noticeStatements,queueEisNotice,confirmLocation} from './monitor';
 import {setup} from './setup';
 import {questions,validate,offer} from './dialog';
 // Cloudflare Worker. Aggregate RSS announcements stay separate from verified lots.
 import { parseCard, pendingCardUrl, readCard } from './card';
-import { authorized, feed, identity, eisTime, eisOrderNumber, rzdTime, publicCatalogues, catalogueMatch, serviceMatch } from './core.mjs';
+import { authorized, feed, identity, eisTime, eisOrderNumber, rzdTime, publicCatalogues, catalogueMatch } from './core.mjs';
 
 interface Statement {
   bind(...args:unknown[]):Statement;
@@ -69,10 +69,11 @@ async function poll(e:Env) {
     const rows=feed(xml+decoder.decode());
     const next=rows.length>=10?String((Number(source.cursor)||1)+1):'1';
     const batch=rows.map((r:any)=>sql(e,'INSERT INTO notices(url,title,description,published) VALUES(?,?,?,?) ON CONFLICT(url) DO UPDATE SET title=excluded.title,description=excluded.description,published=excluded.published,updated=unixepoch() WHERE title!=excluded.title OR description!=excluded.description',r.url,r.title,r.description,r.published));
-    for(const notice of rows){
-      if(!serviceMatch(notice.title+' '+notice.description))continue;
-      const message='ЕИС · требуется проверить место исполнения в оригинале\n'+notice.title.slice(0,600)+'\n'+notice.url;
-      batch.push(queueEisNotice(e,notice.url,JSON.stringify({text:message})));
+    for(const notice of rows.filter(r=>catalogueMatch(r.title)).slice(0,2)){
+      const location=await confirmLocation(notice);
+      if(!location)continue;
+      const message='ЕИС · закупка в Хабаровске\n'+notice.title.slice(0,600)+'\n'+location+'\n'+notice.url;
+      batch.push(queueEisNotice(e,notice.url,JSON.stringify({text:message,location})));
     }
     batch.push(sql(e,"UPDATE sources SET last_ok=unixepoch(),cursor=?,last_error=NULL WHERE id='eis'",next));
     await e.DB.batch(batch);
@@ -128,7 +129,13 @@ async function deliver(e:Env) {
     // Persist uncertainty before sending. Never resend a possible successful delivery automatically.
     const m=await sql(e,"UPDATE outbox SET state='uncertain' WHERE id=(SELECT id FROM outbox WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM telegram_cooldown WHERE until_ts>unixepoch()) ORDER BY id LIMIT 1) RETURNING *").first();
     if(!m)return;
-    const payload=JSON.parse(m.payload);
+    const {location,...payload}=JSON.parse(m.payload);
+    const key=String(m.dedupe);
+    const source=key.startsWith('eis/')?'eis':key.startsWith('b2b/')?'b2b':key.startsWith('https://')?'catalogue':null;
+    if(source&&!location){
+      await sql(e,"UPDATE outbox SET state='suppressed' WHERE id=? AND state='uncertain'",m.id).run();
+      continue;
+    }
     let r:Response|null;
     if(payload.word){
       const {lot,vat}=payload.word;
@@ -152,8 +159,6 @@ async function deliver(e:Env) {
     if(result.state!=='sent')continue;
     const ack=result.ack;
     const changes=[sql(e,"UPDATE outbox SET state='sent',message_id=? WHERE id=?",ack.message_id,m.id)];
-    const key=String(m.dedupe);
-    const source=key.startsWith('eis/')?'eis':key.startsWith('b2b/')?'b2b':key.startsWith('https://')?'catalogue':null;
     if(source && Number.isSafeInteger(ack.date)){
       let published=null;
       const noticeUrl=source==='b2b'?String(payload.text||'').trim().split('\n').pop():source==='eis'?key.slice(4):key;
@@ -444,12 +449,12 @@ async function telegram(req:Request,e:Env){
     case '/semantic':{
       if(!e.AI){reply='Бесплатная модель поиска пока не подключена.';break;}
       const {results}=await sql(e,'SELECT n.title,n.url,r.scenario FROM semantic_results r JOIN notices n ON n.url=r.url AND n.updated=r.source_updated ORDER BY r.score DESC LIMIT 4').all();
-      reply=results.map(x=>x.title.slice(0,360)+'\nСопоставлено со сценарием: '+x.scenario+'\n'+x.url).join('\n\n') || 'Очередь смысловой проверки ещё не обработана.';
+      reply=results.length?'Архив смыслового поиска. Место исполнения в этих карточках может быть не подтверждено.\n\n'+results.map(x=>x.title.slice(0,360)+'\nСопоставлено со сценарием: '+x.scenario+'\n'+x.url).join('\n\n'):'Очередь смысловой проверки ещё не обработана.';
       break;
     }
     case '/inbox':{
-      const {results}=await sql(e,'SELECT title,url FROM notices ORDER BY updated DESC LIMIT 5').all();
-      reply=results.map(x=>x.title.slice(0,320)+'\n'+x.url).join('\n\n') || 'Извещений пока нет.';break;
+      const {results}=await sql(e,"SELECT json_extract(payload,'$.text') AS text FROM outbox WHERE owner=? AND json_extract(payload,'$.location') IS NOT NULL ORDER BY id DESC LIMIT 5",user).all();
+      reply=results.map(x=>x.text).join('\n\n').slice(0,3900) || 'Пока нет новых закупок с указанным местом исполнения в Хабаровске.';break;
     }
     case '/pause':case '/resume':
       mutations.push(sql(e,'UPDATE agent_state SET paused=? WHERE id=1',text==='/pause'?1:0));reply=text==='/pause'?'Mac на паузе.':'Mac продолжит обработку.';break;
@@ -621,7 +626,8 @@ async function agent(req:Request,e:Env,path:string,ctx?:Background) {
       if(!Number.isFinite(stamp)||stamp<=0||stamp>Date.now()||new Date(stamp).toISOString()!==value)return response({},400);
       published=value;
     }
-    const {statements,notifications}=noticeStatements(e,eis?(match[2]?'eis-price_requests':'eis-orders'):regional?'otc-khab':eat?'eat':rts?'rts-rzd-search':'comita-rzd',[{title,url,published}],!review);
+    const location=matched?await confirmLocation({title,url}):'';
+    const {statements,notifications}=noticeStatements(e,eis?(match[2]?'eis-price_requests':'eis-orders'):regional?'otc-khab':eat?'eat':rts?'rts-rzd-search':'comita-rzd',[{title,url,published,location}],!review);
     const results=await e.DB.batch(statements);
     if(notifications.some(i=>results[i].meta.changes>0))await dispatchQueued(e,ctx);
     return response({status:matched?'accepted':'filtered'});

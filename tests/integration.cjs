@@ -141,7 +141,7 @@ test('B2B stores one notice from a tracked catalogue URL and honors Retry-After'
     if(String(url).includes('market-search'))return new Response('<a href="'+slug+'#btid=2"></a><a href="'+slug+'">№ 1234567</a><a href="'+unrelated+'">№ 2345678</a>');
     if(url==='https://www.b2b-center.ru'+unrelated)return new Response('<title>Доставка канцелярских товаров — Тендер № 2345678 — B2B-Center</title>');
     assert.equal(url,'https://www.b2b-center.ru'+slug);
-    return new Response('<title>Погрузка вагонов — Тендер № 1234567 — B2B-Center</title>');
+    return new Response('<title>Погрузка вагонов в Хабаровске — Тендер № 1234567 — B2B-Center</title>');
   };
   try{
     await monitor.b2b(env);
@@ -151,7 +151,7 @@ test('B2B stores one notice from a tracked catalogue URL and honors Retry-After'
       db.exec("UPDATE sources SET next_at=0 WHERE id='b2b'");
       await monitor.b2b(env);
     }
-    assert.deepEqual(db.prepare('SELECT title FROM notices ORDER BY title').all().map(r=>r.title),['Доставка канцелярских товаров','Погрузка вагонов']);
+    assert.deepEqual(db.prepare('SELECT title FROM notices ORDER BY title').all().map(r=>r.title),['Доставка канцелярских товаров','Погрузка вагонов в Хабаровске']);
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM outbox').get().n,1);
     assert.equal(db.prepare('SELECT dedupe FROM outbox').get().dedupe,'b2b/1234567');
     assert.equal(db.prepare("SELECT last_error FROM sources WHERE id='b2b'").get().last_error,null);
@@ -194,7 +194,7 @@ test('Scheduled EIS poll sends a matching notice once and skips unrelated suppli
  db.exec("INSERT INTO owner(id) VALUES('1')");
  const previous=global.fetch, sent=[];
  const published=new Date(Date.now()-600000).toUTCString();
- const items=['Услуги по выгрузке вагонов в Хабаровске','Поставка железнодорожных колёс в Хабаровск'];
+ const items=['Услуги по выгрузке вагонов в Хабаровске','Поставка железнодорожных колёс в Хабаровск','Выгрузка вагонов в Беркаките','Разгрузка вагонов'];
  global.fetch=async(url,opts)=>{
    if(String(url).startsWith('https://zakupki.gov.ru/')) return new Response('<rss><channel>'+items.map((title,i)=>'<item><link>https://zakupki.gov.ru/'+i+'</link><title>'+title+'</title><pubDate>'+published+'</pubDate></item>').join('')+'</channel></rss>');
    if(String(url).endsWith('/sendMessage')){sent.push(JSON.parse(opts.body).text);return Response.json({ok:true,result:{message_id:55,date:Math.floor(Date.now()/1000)}});}
@@ -206,7 +206,7 @@ test('Scheduled EIS poll sends a matching notice once and skips unrelated suppli
    const delivery=db.prepare('SELECT sent-published AS seconds FROM delivery_observations').get();
    assert.ok(delivery.seconds>=600 && delivery.seconds<=605);
    assert.match(sent[0],/выгрузке вагонов/);
-   assert.equal(db.prepare('SELECT count(*) n FROM notices').get().n,2);
+   assert.equal(db.prepare('SELECT count(*) n FROM notices').get().n,4);
  }finally{global.fetch=previous;db.close();}
 });
 test('Semantic queue survives quota errors, caches profile and updates edited notices',async()=>{
@@ -260,7 +260,7 @@ test('Roseltorg advances its cursor after writing matches and preserves it on a 
   global.fetch=async url=>{
    const u=new URL(url);assert.equal(u.pathname,'/procedures/search_ajax');assert.equal(u.searchParams.get('status[]'),'0');
    if(fail)return new Response('unavailable',{status:503});
-   return new Response('<a href="/procedure/B12345678/2" class="search-results__link--description">Услуги по выгрузке вагонов</a><button class="pagination__btn--next" data-href="?page=1"></button>');
+   return new Response('<a href="/procedure/B12345678/2" class="search-results__link--description">Услуги по выгрузке вагонов в Хабаровске</a><button class="pagination__btn--next" data-href="?page=1"></button>');
   };
   db.exec("INSERT INTO owner(id) VALUES('1')");
   await monitor.publicPoll(env,'roseltorg');
@@ -284,7 +284,7 @@ test('Offer uses the verified Roseltorg lot and requires a named customer',()=>{
 test('Mac catalogue independently reports errors and shares cloud notice deduplication',async()=>{
  const {db,env}=fixture();
  const {macCatalogue}=require(path.join(tmp,'monitor.js'));
- const html='<a href="/procedure/B12345678/2" class="search-results__link--description">Услуги по выгрузке вагонов</a>';
+ const html='<a href="/procedure/B12345678/2" class="search-results__link--description">Услуги по выгрузке вагонов в Хабаровске</a>';
  try{
   db.exec("INSERT INTO owner(id) VALUES('1')");
   await macCatalogue(env,'roseltorg',html,'');
@@ -297,9 +297,9 @@ test('Mac catalogue independently reports errors and shares cloud notice dedupli
 });
 test('Mac upload dispatches a new match before cron and ignores repeated uploads',async()=>{
  const {db,env}=fixture(),original=global.fetch,pending=[];
- const html='<a href="/procedure/B12345678/2" class="search-results__link--description">Услуги по выгрузке вагонов</a>';
+ const html='<a href="/procedure/B12345678/2" class="search-results__link--description">Услуги по выгрузке вагонов в Хабаровске</a>';
  let sent=0;
- global.fetch=async(url)=>{assert.ok(String(url).endsWith('/sendMessage'));return Response.json({ok:true,result:{message_id:++sent,date:Math.floor(Date.now()/1000)}});};
+ global.fetch=async(url)=>{if(String(url).includes('roseltorg.ru'))return new Response(null,{status:503});assert.ok(String(url).endsWith('/sendMessage'));return Response.json({ok:true,result:{message_id:++sent,date:Math.floor(Date.now()/1000)}});};
  const upload=()=>worker.fetch(new Request('https://test.invalid/agent/catalogue',{method:'POST',headers:{Authorization:'Bearer '+env.AGENT_KEY},body:JSON.stringify({source:'roseltorg',html})}),env,{waitUntil:task=>pending.push(task)});
  try{
   db.exec("INSERT INTO owner(id) VALUES('1')");
@@ -313,13 +313,13 @@ test('Mac upload dispatches a new match before cron and ignores repeated uploads
 test('Changed B2B titles refresh the stored original without a duplicate Telegram notification',async()=>{
  const {db,env}=fixture(), old=global.fetch;
  const monitor=require(path.join(tmp,'monitor.js'));
- let title='Погрузка вагонов';
+ let title='Погрузка вагонов в Хабаровске';
  global.fetch=async()=>new Response('<a href="/market/gruz/tender-9999/">Тендер</a><p class="panel-procedure__dscr-main">'+title+'</p>');
  try{
   db.exec("INSERT INTO owner(id) VALUES('1')");
   await monitor.b2b(env);
   const before=db.prepare('SELECT updated FROM notices').get().updated;
-  title='Погрузка вагонов на площадке исполнителя';
+  title='Погрузка вагонов на площадке исполнителя в Хабаровске';
   db.exec('UPDATE sources SET next_at=0');
   await monitor.b2b(env);
   const row=db.prepare('SELECT title,updated FROM notices').get();
@@ -382,7 +382,7 @@ print(''.join(E.fromstring(z.read('word/document.xml')).itertext()))`],{input:do
 
 test('EAT sends a matching original only to the owner, rejects invalid URLs and deduplicates retries',async()=>{
  const {db,env}=fixture(),original=global.fetch,pending=[],sent=[];
- const card={procedure:'100000000000000001',title:'Услуги по выгрузке вагонов',url:'https://agregatoreat.ru/purchases/announcement/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/'};
+ const card={procedure:'100000000000000001',title:'Услуги по выгрузке вагонов в Хабаровске',url:'https://agregatoreat.ru/purchases/announcement/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/'};
  const upload=(data)=>worker.fetch(new Request('https://test.invalid/agent/eat-candidate',{method:'POST',headers:{Authorization:'Bearer '+env.AGENT_KEY},body:JSON.stringify(data)}),env,{waitUntil:task=>pending.push(task)});
  global.fetch=async(url,opts)=>{assert.ok(String(url).endsWith('/sendMessage'));sent.push(JSON.parse(opts.body));return Response.json({ok:true,result:{message_id:1,date:Math.floor(Date.now()/1000)}});};
  try{
@@ -402,7 +402,7 @@ test('EAT sends a matching original only to the owner, rejects invalid URLs and 
 
 test('Regional RZD marketplace accepts its own original and places it in the owner queue', async()=>{
  const {db,env}=fixture(),pending=[],original=global.fetch;
- const upload=(url,published)=>worker.fetch(new Request('https://test.invalid/agent/comita-candidate',{method:'POST',headers:{Authorization:'Bearer '+env.AGENT_KEY},body:JSON.stringify({title:'Услуги по выгрузке вагонов',procedure:'241937',url,published})}),env,{waitUntil:task=>pending.push(task)});
+ const upload=(url,published)=>worker.fetch(new Request('https://test.invalid/agent/comita-candidate',{method:'POST',headers:{Authorization:'Bearer '+env.AGENT_KEY},body:JSON.stringify({title:'Услуги по выгрузке вагонов в Хабаровске',procedure:'241937',url,published})}),env,{waitUntil:task=>pending.push(task)});
  global.fetch=async()=>Response.json({ok:true,result:{message_id:2,date:Math.floor(Date.now()/1000)}});
  try{
   db.exec("INSERT INTO owner(id) VALUES('1')");
@@ -466,7 +466,7 @@ test('EIS 223 redirects and legacy URLs deliver one alert for the same procureme
  const current=base+'/223/purchase/public/purchase/info/common-info.html?regNumber='+procedure;
  const upload=url=>worker.fetch(new Request('https://test.invalid/agent/eis-candidate',{
    method:'POST',headers:{Authorization:'Bearer '+env.AGENT_KEY},
-   body:JSON.stringify({url,procedure,title:'Услуги по выгрузке вагонов'})
+   body:JSON.stringify({url,procedure,title:'Услуги по выгрузке вагонов в Хабаровске'})
  }),env,{waitUntil:task=>pending.push(task)});
  global.fetch=async(url,options)=>{
    assert.ok(String(url).endsWith('/sendMessage'));
@@ -494,7 +494,7 @@ test('Telegram opens EIS through Mac and requires a freshly verified original be
  const {db,env}=fixture(),sent=[],documents=[],pending=[],original=global.fetch;
  const procedure='0322200001326000255';
  const url='https://zakupki.gov.ru/epz/order/notice/zk20/view/common-info.html?regNumber='+procedure;
- const title='Выгрузка вагонов';
+ const title='Выгрузка вагонов в Хабаровске';
  const html='<span class="cardMainInfo__purchaseLink">№ '+procedure+'</span>'+
    '<span class="cardMainInfo__state">Подача заявок</span>'+
    '<span class="cardMainInfo__title">Объект закупки</span><span class="cardMainInfo__content">'+title+'</span>'+
@@ -610,4 +610,51 @@ test('Фоновая сверка РЖД сохраняет историю, пр
   assert.match(messages[0].text,/Приём заявок → Отменена/);
   assert.equal(db.prepare("SELECT last_error FROM sources WHERE id='watch/rzd'").get().last_error,null);
  }finally{global.fetch=original;db.close()}
+});
+
+test('Only explicit work geography triggers a catalogue alert and the original address wins',async()=>{
+ const {db,env}=fixture(),original=global.fetch;
+ const {noticeStatements,confirmLocation}=require(path.join(tmp,'monitor.js'));
+ const {khabarovskLocation}=require(path.join(tmp,'core.mjs'));
+ const url='https://www.roseltorg.ru/procedure/B12345678/2';
+ const title='Выгрузка вагонов';
+ const originalCard=place=>'<div class="lot-page__left-column-lot" data-feature-favorite-lots-procedure-number="B12345678" data-feature-favorite-lots-lot-number="2"><h1>'+title+'</h1><div class="lot-delivery__text"><div>'+place+'</div></div></div>';
+ try{
+  db.exec("INSERT INTO owner(id) VALUES('1')");
+  for(const where of ['', 'в Беркаките', 'в Хабаровском крае', 'из Хабаровска', 'для нужд филиала в Хабаровске']){
+   assert.equal(khabarovskLocation(title+' '+where),'');
+  }
+  global.fetch=async()=>new Response(originalCard('Хабаровский край, г. Хабаровск, ул. Пушкина, 46'));
+  const location=await confirmLocation({title,url});
+  assert.match(location,/оригинале.*Пушкина/);
+  global.fetch=async()=>new Response(originalCard('Якутия, Беркакит'));
+  assert.equal(await confirmLocation({title:title+' в Хабаровске',url}),'');
+  const {statements}=noticeStatements(env,'roseltorg',[
+   {title:title+' в Беркаките',url:url.replace('/2','/3')},
+   {title,url:url.replace('/2','/4')},
+   {title,url,location}
+  ]);
+  await env.DB.batch(statements);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM notices').get().n,3);
+  assert.match(JSON.parse(db.prepare('SELECT payload FROM outbox').get().payload).text,/Пушкина/);
+ }finally{global.fetch=original;db.close();}
+});
+
+test('Legacy national alerts are suppressed while Telegram commands still reply',async()=>{
+ const {db,env}=fixture(),original=global.fetch,sent=[];
+ const update={update_id:1,message:{chat:{type:'private',id:1},from:{id:1},text:'/inbox'}};
+ global.fetch=async(url,opts)=>{
+  assert.ok(String(url).endsWith('/sendMessage'));
+  sent.push(JSON.parse(opts.body));
+  return Response.json({ok:true,result:{message_id:sent.length}});
+ };
+ try{
+  db.exec("INSERT INTO owner(id) VALUES('1')");
+  db.prepare("INSERT INTO outbox(dedupe,owner,payload) VALUES('b2b/1234','1',?)").run(JSON.stringify({text:'Выгрузка вагонов в Беркаките'}));
+  db.prepare("INSERT INTO outbox(dedupe,owner,payload) VALUES('b2b/1235','1',?)").run(JSON.stringify({text:'Выгрузка вагонов в Хабаровске',location:'Хабаровск'}));
+  await worker.fetch(new Request('https://test.invalid/telegram',{method:'POST',headers:{'X-Telegram-Bot-Api-Secret-Token':env.WEBHOOK_SECRET},body:JSON.stringify(update)}),env);
+  assert.equal(db.prepare("SELECT state FROM outbox WHERE dedupe='b2b/1234'").get().state,'suppressed');
+  assert.equal(sent.length,2);
+  assert.ok(sent.every(message=>message.text==='Выгрузка вагонов в Хабаровске' && !Object.hasOwn(message,'location')));
+ }finally{global.fetch=original;db.close();}
 });
